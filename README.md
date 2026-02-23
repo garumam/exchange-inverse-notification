@@ -264,6 +264,17 @@ sudo systemctl disable bybit-notifier
    - **Iniciar WebSocket**: Inicie monitoramento para uma conta específica ou todas
    - **Parar WebSocket**: Pare o monitoramento de uma conta ou todas
 
+## Integração com Google Planilhas
+
+O aplicativo suporta integração com Google Planilhas para salvar automaticamente os dados das operações monitoradas. Para configurar:
+
+1. Configure um script no Google Apps Script seguindo o guia: [**Configuração do Webhook Google Planilhas**](GOOGLE_SHEETS_SETUP.md)
+2. Ao cadastrar ou editar uma conta, forneça:
+   - **Webhook URL Google Planilhas**: Link gerado pelo Google Apps Script
+   - **URL da planilha do Google**: URL da planilha onde os dados serão salvos
+
+> **Nota**: Se você preencher o Webhook URL Google Planilhas, a URL da planilha se torna obrigatória.
+
 ## Notificações
 
 O aplicativo monitora apenas ordens do tipo `inverse` e notifica quando:
@@ -307,7 +318,8 @@ O SQLite armazena:
 ├── build-docker-windows.ps1          # Script de build Windows via Docker (Windows)
 ├── build-docker-linux.sh             # Script de build Linux via Docker (Linux)
 ├── build-docker-linux.ps1            # Script de build Linux via Docker (Windows)
-└── README.md                         # Este arquivo
+├── README.md                          # Este arquivo
+└── GOOGLE_SHEETS_SETUP.md            # Guia de configuração do Google Planilhas
 ```
 
 ## Licença
