@@ -2,9 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,12 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-)
-
-const (
-	bybitWSURL = "wss://stream.bybit.com/v5/private"
 )
 
 type WebSocketManager struct {
@@ -108,7 +100,6 @@ type WalletData struct {
 	TotalEquity            string        `json:"totalEquity"`
 	TotalWalletBalance     string        `json:"totalWalletBalance"`
 	TotalMarginBalance     string        `json:"totalMarginBalance"`
-	TotalAvailableBalance  string        `json:"totalAvailableBalance"`
 	TotalPerpUPL           string        `json:"totalPerpUPL"`
 	TotalInitialMargin     string        `json:"totalInitialMargin"`
 	TotalMaintenanceMargin string        `json:"totalMaintenanceMargin"`
@@ -140,7 +131,6 @@ type PositionData struct {
 	PositionValue   string `json:"positionValue"`
 	PositionIM      string `json:"positionIM"`
 	PositionMM      string `json:"positionMM"`
-	UnrealisedPnl   string `json:"unrealisedPnl"`
 	StopLoss        string `json:"stopLoss"`
 	TakeProfit      string `json:"takeProfit"`
 	Category        string `json:"category"`
@@ -151,10 +141,6 @@ type CoinBalance struct {
 	Coin            string `json:"coin"`
 	Equity          string `json:"equity"`
 	UsdValue        string `json:"usdValue"`
-	WalletBalance   string `json:"walletBalance"`
-	AvailableToWithdraw string `json:"availableToWithdraw"`
-	UnrealisedPnl   string `json:"unrealisedPnl"`
-	CumRealisedPnl  string `json:"cumRealisedPnl"`
 }
 
 type OrderData struct {
@@ -577,245 +563,12 @@ func (wsm *WebSocketManager) runConnection(wsConn *WebSocketConnection) {
 	}
 }
 
+// connectAndListen despacha para a implementação da plataforma (Bybit ou OKX).
 func (wsm *WebSocketManager) connectAndListen(wsConn *WebSocketConnection, successChan chan<- bool) (err error) {
-	// Capturar panics
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "[PANIC] connectAndListen para conta %d: %v\n", wsConn.AccountID, r)
-			
-			// Tentar logar o panic (mas não bloquear se falhar)
-			func() {
-				defer func() {
-					if r2 := recover(); r2 != nil {
-						fmt.Fprintf(os.Stderr, "ERRO ao tentar logar o panic: %v\n", r2)
-					}
-				}()
-				logger, _ := getLogger(wsConn.AccountID, wsConn.Account.Name)
-				if logger != nil {
-					logger.Log("PANIC em connectAndListen: %v", r)
-				}
-			}()
-			
-			err = fmt.Errorf("panic: %v", r)
-		}
-	}()
-
-	logger, logErr := getLogger(wsConn.AccountID, wsConn.Account.Name)
-	if logErr != nil {
-		fmt.Fprintf(os.Stderr, "ERRO: Não foi possível criar logger para conta %d: %v\n", wsConn.AccountID, logErr)
+	if wsConn.Account.Platform == "okx" {
+		return wsm.connectAndListenOKX(wsConn, successChan)
 	}
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	conn, _, err := dialer.Dial(bybitWSURL, nil)
-	if err != nil {
-		if logger != nil {
-			logger.Log("Erro ao conectar: %v", err)
-		}
-		return fmt.Errorf("erro ao conectar: %w", err)
-	}
-
-	wsConn.mu.Lock()
-	// Fechar conexão antiga se existir
-	if wsConn.Conn != nil {
-		wsConn.Conn.Close()
-	}
-	wsConn.Conn = conn
-	wsConn.mu.Unlock()
-
-	// Garantir que a conexão seja fechada ao sair
-	defer func() {
-		wsConn.mu.Lock()
-		if wsConn.Conn == conn {
-			wsConn.Conn.Close()
-			wsConn.Conn = nil
-		}
-		wsConn.mu.Unlock()
-		conn.Close()
-	}()
-
-	// Autenticar
-	if err := wsm.authenticate(conn, wsConn.Account); err != nil {
-		if logger != nil {
-			logger.Log("Erro na autenticação: %v", err)
-		}
-		return fmt.Errorf("erro na autenticação: %w", err)
-	}
-
-	// Aguardar resposta de autenticação
-	time.Sleep(1 * time.Second)
-
-	// Inscrever nos tópicos order, execution, position e wallet
-	subscribeMsg := map[string]interface{}{
-		"op":   "subscribe",
-		"args": []string{"order", "execution", "position", "wallet"},
-	}
-
-	if err := conn.WriteJSON(subscribeMsg); err != nil {
-		if logger != nil {
-			logger.Log("Erro ao inscrever: %v", err)
-		}
-		return fmt.Errorf("erro ao inscrever: %w", err)
-	}
-
-	// if logger != nil {
-	// 	logger.Log("WebSocket conectado, autenticado e inscrito nos tópicos 'order', 'execution', 'position' e 'wallet'")
-	// }
-
-	// Sinalizar sucesso após conexão, autenticação e inscrição bem-sucedidas
-	// Isso permite resetar o retry antes de entrar no loop de leitura
-	if successChan != nil {
-		select {
-		case successChan <- true:
-		default:
-			// Canal cheio ou fechado, não bloquear
-		}
-	}
-
-	// Configurar timeouts e pong handler
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
-
-	// Criar um canal de stop específico para o pingLoop desta conexão
-	pingStopChan := make(chan struct{})
-	
-	// Iniciar ping em goroutine separada
-	go wsm.pingLoop(conn, pingStopChan)
-	
-	// Garantir que o pingLoop seja parado quando sair desta função
-	defer close(pingStopChan)
-
-	// Ler mensagens
-	for {
-		select {
-		case <-wsConn.StopChan:
-			return nil
-		default:
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-			messageType, message, err := conn.ReadMessage()
-			if err != nil {
-				// Verificar se foi parado manualmente
-				select {
-				case <-wsConn.StopChan:
-					return nil
-				default:
-				}
-
-				// Verificar se é um erro de fechamento
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					// Fechamento normal - retornar nil para reconectar
-					if logger != nil {
-						logger.Log("Conexão fechada normalmente pelo servidor")
-					}
-					return nil
-				}
-
-				// Para erros 1006 (abnormal closure) e outros erros inesperados,
-				// garantir que a conexão seja limpa antes de retornar
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					if logger != nil {
-						logger.Log("Erro inesperado de fechamento: %v", err)
-					}
-					// Limpar conexão antes de retornar
-					wsConn.mu.Lock()
-					if wsConn.Conn == conn {
-						wsConn.Conn = nil
-					}
-					wsConn.mu.Unlock()
-					return fmt.Errorf("erro ao ler mensagem: %w", err)
-				}
-				
-				// Timeout ou erro de leitura, reconectar
-				// if logger != nil {
-				// 	logger.Log("Erro na leitura (timeout ou outro): %v", err)
-				// }
-				
-				// Limpar conexão antes de retornar
-				wsConn.mu.Lock()
-				if wsConn.Conn == conn {
-					wsConn.Conn = nil
-				}
-				wsConn.mu.Unlock()
-				return fmt.Errorf("erro na leitura: %w", err)
-			}
-
-			// Processar apenas mensagens de texto
-			if messageType == websocket.TextMessage {
-				wsm.handleMessage(wsConn, message)
-			}
-		}
-	}
-}
-
-func (wsm *WebSocketManager) authenticate(conn *websocket.Conn, account *BybitAccount) error {
-	// Limpar espaços das credenciais
-	apiKey := strings.TrimSpace(account.APIKey)
-	apiSecret := strings.TrimSpace(account.APISecret)
-
-	// Gerar timestamp atual em milissegundos (como número, não string)
-	// A biblioteca oficial adiciona 10 segundos (10000ms) ao timestamp
-	expires := time.Now().UnixNano()/1e6 + 10000
-
-	// Criar string para assinatura: GET/realtime{expires}
-	// IMPORTANTE: expires é um número, não string
-	signatureString := fmt.Sprintf("GET/realtime%d", expires)
-
-	// Calcular HMAC SHA256
-	mac := hmac.New(sha256.New, []byte(apiSecret))
-	mac.Write([]byte(signatureString))
-	
-	// IMPORTANTE: A biblioteca oficial usa HEX, não base64!
-	signature := hex.EncodeToString(mac.Sum(nil))
-
-
-	// Criar mensagem de autenticação conforme biblioteca oficial
-	// Formato: {"req_id": "uuid", "op": "auth", "args": [apiKey, expires, signature]}
-	// expires e signature são números/hex, não strings
-	authMsg := map[string]interface{}{
-		"req_id": uuid.New().String(),
-		"op":     "auth",
-		"args":   []interface{}{apiKey, expires, signature},
-	}
-
-	// Serializar manualmente para garantir formato exato (sem espaços extras)
-	jsonData, err := json.Marshal(authMsg)
-	if err != nil {
-		return fmt.Errorf("erro ao serializar mensagem de autenticação: %w", err)
-	}
-
-	// Enviar como mensagem de texto (não JSON struct)
-	if err := conn.WriteMessage(websocket.TextMessage, jsonData); err != nil {
-		return fmt.Errorf("erro ao enviar mensagem de autenticação: %w", err)
-	}
-
-	// Aguardar resposta de autenticação
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var authResponse map[string]interface{}
-	if err := conn.ReadJSON(&authResponse); err != nil {
-		return fmt.Errorf("erro ao ler resposta de autenticação: %w", err)
-	}
-
-	// Verificar se autenticação foi bem-sucedida
-	if success, ok := authResponse["success"].(bool); ok && !success {
-		retMsg, _ := authResponse["ret_msg"].(string)
-		return fmt.Errorf("autenticação falhou: %s (resposta: %v)", retMsg, authResponse)
-	}
-
-	// Verificar se success é true
-	if success, ok := authResponse["success"].(bool); ok && success {
-		logger, _ := getLogger(account.ID, account.Name)
-		if logger != nil {
-			logger.Log("✅ Autenticação bem-sucedida")
-		}
-		return nil
-	}
-
-	return fmt.Errorf("resposta de autenticação inesperada: %v", authResponse)
+	return wsm.connectAndListenBybit(wsConn, successChan)
 }
 
 func (wsm *WebSocketManager) pingLoop(conn *websocket.Conn, stopChan chan struct{}) {
@@ -2361,13 +2114,13 @@ func (wsm *WebSocketManager) flushExecutionNotificationBuffer(accountID int64) {
 			coin := symbolToCoin(e.Symbol)
 			price, _ := strconv.ParseFloat(e.ExecPrice, 64)
 			qtyUsd, _ := strconv.ParseFloat(e.ExecQty, 64)    // valor em USD
-			qtyCoin, _ := strconv.ParseFloat(e.ExecValue, 64) // valor na moeda (varia muito por moeda)
+
 			stopText := ""
 			if e.CreateType == "CreateByStopOrder" {
 				stopText = "Stop "
 			}
-			parts = append(parts, fmt.Sprintf("%s - %s %s%s | Preço: %s | %s: %s | USD: %s",
-				formatExecTimeToBrasilia(e.ExecTime), e.Side, stopText, e.OrderType, formatPriceCoin(price), coin, formatQtyCoin(qtyCoin), formatPriceCoin(qtyUsd)))
+			parts = append(parts, fmt.Sprintf("%s - %s %s %s%s | Preço: %s | USD: %s",
+				formatExecTimeToBrasilia(e.ExecTime), coin, e.Side, stopText, e.OrderType, formatPriceCoin(price), formatPriceCoin(qtyUsd)))
 		}
 		messageText := strings.Join(parts, "\n")
 		go wsm.sendExecutionNotification(wsConn, messageText)
@@ -2408,9 +2161,8 @@ func (wsm *WebSocketManager) sendExecutionNotification(wsConn *WebSocketConnecti
 	if wsConn.Account.MarkEveryoneExecution {
 		everyoneTag = "@everyone "
 	}
-	now := getBrasiliaTime()
-	timeStamp := fmt.Sprintf("🕘  %s - %s (Horário de Brasília)", now.Format("02/01/2006"), now.Format("15:04"))
-	discordMsg := fmt.Sprintf("%s🔔 Execuções\n%s\n\n%s", everyoneTag, messageText, timeStamp)
+
+	discordMsg := fmt.Sprintf("%s🔔 Execuções\n%s", everyoneTag, messageText)
 	if err := sendDiscordWebhook(wsConn.Account.WebhookURLExecutions, discordMsg); err != nil {
 		logger, _ := getLogger(wsConn.AccountID, wsConn.Account.Name)
 		if logger != nil {

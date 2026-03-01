@@ -132,6 +132,13 @@ func (d *Database) initSchema() error {
 		return err
 	}
 
+	if err := d.addColumnIfNotExists("bybit_accounts", "platform", "TEXT NOT NULL DEFAULT 'bybit'"); err != nil {
+		return err
+	}
+	if err := d.addColumnIfNotExists("bybit_accounts", "metadata", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+
 	return nil
 }
 

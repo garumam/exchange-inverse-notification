@@ -36,7 +36,7 @@ func main() {
 
 		switch choice {
 		case "1":
-			handleAddAccount(manager, scanner)
+			handleAddAccountMenu(manager, scanner)
 		case "2":
 			handleListAccounts(manager, wsManager, scanner)
 		case "3":
@@ -91,7 +91,7 @@ func showMenu(wsManager *WebSocketManager) {
 	fmt.Println("\n=== Gerenciador de Contas Bybit ===")
 	fmt.Printf("📊 Contas sendo monitoradas: %d\n", monitoredCount)
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Println("1. Cadastrar conta Bybit")
+	fmt.Println("1. Cadastrar conta")
 	fmt.Println("2. Listar contas cadastradas")
 	fmt.Println("3. Remover conta cadastrada")
 	fmt.Println("4. Editar conta")
@@ -106,11 +106,96 @@ func showMenu(wsManager *WebSocketManager) {
 	fmt.Println()
 }
 
-func handleAddAccount(manager *AccountManager, scanner *bufio.Scanner) {
+// AuthField descreve um campo de autenticação por plataforma.
+type AuthField struct {
+	Label    string
+	Key      string
+	Required bool
+}
+
+// GetAuthOptionsBybit retorna as opções de autenticação para Bybit: API Key e API Secret.
+func GetAuthOptionsBybit() []AuthField {
+	return []AuthField{
+		{Label: "API Key", Key: "api_key", Required: true},
+		{Label: "API Secret", Key: "api_secret", Required: true},
+	}
+}
+
+// GetAuthOptionsOKX retorna as opções de autenticação para OKX: API Key, API Secret e Passphrase.
+func GetAuthOptionsOKX() []AuthField {
+	return []AuthField{
+		{Label: "API Key", Key: "api_key", Required: true},
+		{Label: "API Secret", Key: "api_secret", Required: true},
+		{Label: "Passphrase", Key: "passphrase", Required: true},
+	}
+}
+
+// handleAddAccountMenu exibe escolha de plataforma e chama o fluxo correto de cadastro.
+func handleAddAccountMenu(manager *AccountManager, scanner *bufio.Scanner) {
 	clearScreen()
-	fmt.Println("=== Cadastrar Conta Bybit ===")
+	fmt.Println("=== Cadastrar Conta ===")
+	fmt.Println("Escolha a plataforma:")
+	fmt.Println("1. Bybit")
+	fmt.Println("2. OKX")
+	fmt.Println("0. Voltar ao menu principal")
+	fmt.Print("\nOpção: ")
+	scanner.Scan()
+	opt := strings.TrimSpace(scanner.Text())
+	switch opt {
+	case "0":
+		return
+	case "1":
+		handleAddAccountBybit(manager, scanner)
+		return
+	case "2":
+		handleAddAccountOKX(manager, scanner)
+		return
+	default:
+		fmt.Println("Opção inválida.")
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+	}
+}
+
+func handleAddAccountBybit(manager *AccountManager, scanner *bufio.Scanner) {
+	handleAddAccountCommon(manager, scanner, "bybit")
+}
+
+func handleAddAccountOKX(manager *AccountManager, scanner *bufio.Scanner) {
+	handleAddAccountCommon(manager, scanner, "okx")
+}
+
+// escapeJSONString escapa aspas e barras invertidas para uso dentro de uma string JSON.
+func escapeJSONString(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, platform string) {
+	clearScreen()
+	title := "=== Cadastrar Conta Bybit ==="
+	if platform == "okx" {
+		title = "=== Cadastrar Conta OKX ==="
+	}
+	fmt.Println(title)
 	fmt.Println("(Digite 'cancelar' ou '0' em qualquer momento para voltar ao menu principal)\n")
-	
+
 	fmt.Print("Nome da conta: ")
 	scanner.Scan()
 	nome := strings.TrimSpace(scanner.Text())
@@ -118,18 +203,34 @@ func handleAddAccount(manager *AccountManager, scanner *bufio.Scanner) {
 		return
 	}
 
-	fmt.Print("API Key: ")
-	scanner.Scan()
-	apiKey := strings.TrimSpace(scanner.Text())
-	if apiKey == "cancelar" || apiKey == "0" {
-		return
+	var opts []AuthField
+	if platform == "okx" {
+		opts = GetAuthOptionsOKX()
+	} else {
+		opts = GetAuthOptionsBybit()
 	}
-
-	fmt.Print("API Secret: ")
-	scanner.Scan()
-	apiSecret := strings.TrimSpace(scanner.Text())
-	if apiSecret == "cancelar" || apiSecret == "0" {
-		return
+	var apiKey, apiSecret, metadata string
+	for _, f := range opts {
+		fmt.Printf("%s: ", f.Label)
+		scanner.Scan()
+		val := strings.TrimSpace(scanner.Text())
+		if val == "cancelar" || val == "0" {
+			return
+		}
+		switch f.Key {
+		case "api_key":
+			apiKey = val
+		case "api_secret":
+			apiSecret = val
+		case "passphrase":
+			metadata = `{"passphrase":"` + escapeJSONString(val) + `"}`
+		}
+		if f.Required && val == "" {
+			fmt.Printf("Erro: %s é obrigatório!\n", f.Label)
+			fmt.Println("\nPressione Enter para voltar ao menu principal...")
+			scanner.Scan()
+			return
+		}
 	}
 
 	fmt.Print("Webhook Discord (opcional, deixe em branco para notificar no terminal): ")
@@ -248,6 +349,8 @@ func handleAddAccount(manager *AccountManager, scanner *bufio.Scanner) {
 		WebhookURLExecutions:            webhookURLExecutions,
 		MarkEveryoneExecution:           markEveryoneExecution,
 		SheetURLGoogleSheetsExecutions:  sheetURLGoogleSheetsExecutions,
+		Platform:                        platform,
+		Metadata:                        metadata,
 	}
 
 	if err := manager.AddAccount(account); err != nil {
@@ -278,8 +381,12 @@ func handleListAccounts(manager *AccountManager, wsManager *WebSocketManager, sc
 			if wsManager.IsConnectionActive(acc.ID) {
 				monitoringStatus = "Ligado"
 			}
-			
+			platformLabel := acc.Platform
+			if platformLabel == "" {
+				platformLabel = "bybit"
+			}
 			fmt.Printf("\n%d. Nome: %s\n", i+1, acc.Name)
+			fmt.Printf("   Plataforma: %s\n", platformLabel)
 			fmt.Printf("   API Key: %s\n", maskAPIKey(acc.APIKey))
 			if acc.WebhookURL != "" {
 				fmt.Printf("   Webhook Discord: Configurado\n")
@@ -468,6 +575,40 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 		newName = account.Name
 	}
 
+	// Credenciais logo após o nome: usar opções da plataforma
+	var editOpts []AuthField
+	if account.Platform == "okx" {
+		editOpts = GetAuthOptionsOKX()
+	} else {
+		editOpts = GetAuthOptionsBybit()
+	}
+	newApiKey := account.APIKey
+	newApiSecret := account.APISecret
+	var newMetadata string
+	for _, f := range editOpts {
+		fmt.Printf("\n%s atual: (configurado)\n", f.Label)
+		fmt.Printf("Novo %s (pressione Enter para manter o atual): ", f.Label)
+		scanner.Scan()
+		val := strings.TrimSpace(scanner.Text())
+		if val == "cancelar" || val == "0" {
+			return
+		}
+		switch f.Key {
+		case "api_key":
+			if val != "" {
+				newApiKey = val
+			}
+		case "api_secret":
+			if val != "" {
+				newApiSecret = val
+			}
+		case "passphrase":
+			if val != "" {
+				newMetadata = `{"passphrase":"` + escapeJSONString(val) + `"}`
+			}
+		}
+	}
+
 	currentWebhook := account.WebhookURL
 	if currentWebhook == "" {
 		currentWebhook = "(não configurado)"
@@ -639,8 +780,8 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 	// Verificar se a conta está sendo monitorada antes de editar
 	wasMonitored := wsManager.IsConnectionActive(account.ID)
 
-	// Atualizar conta
-	if err := manager.UpdateAccount(account.ID, newName, newWebhook, newMarkEveryoneOrder, newMarkEveryoneWallet, newWebhookURLGoogleSheets, newSheetURLGoogleSheets, newWebhookURLExecutions, newSheetURLGoogleSheetsExecutions, newMarkEveryoneExecution); err != nil {
+	// Atualizar conta (newMetadata == "" mantém o metadata atual)
+	if err := manager.UpdateAccount(account.ID, newName, newApiKey, newApiSecret, newWebhook, newMarkEveryoneOrder, newMarkEveryoneWallet, newWebhookURLGoogleSheets, newSheetURLGoogleSheets, newWebhookURLExecutions, newSheetURLGoogleSheetsExecutions, newMarkEveryoneExecution, newMetadata); err != nil {
 		fmt.Printf("\nErro ao editar conta: %v\n", err)
 		fmt.Println("\nPressione Enter para voltar ao menu principal...")
 		scanner.Scan()

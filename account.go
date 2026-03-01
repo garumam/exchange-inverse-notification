@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 type BybitAccount struct {
@@ -19,6 +20,8 @@ type BybitAccount struct {
 	WebhookURLExecutions          string
 	MarkEveryoneExecution         bool
 	SheetURLGoogleSheetsExecutions string
+	Platform                      string // "bybit" ou "okx"
+	Metadata                      string // JSON; OKX: {"passphrase":"..."}
 }
 
 type AccountManager struct {
@@ -30,8 +33,17 @@ func NewAccountManager(db *Database) *AccountManager {
 }
 
 func (am *AccountManager) AddAccount(account *BybitAccount) error {
-	query := `INSERT INTO bybit_accounts (name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions) 
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	platform := strings.TrimSpace(account.Platform)
+	if platform == "" {
+		platform = "bybit"
+	}
+	metadata := account.Metadata
+	if metadata == "" && platform == "okx" {
+		metadata = "{}"
+	}
+
+	query := `INSERT INTO bybit_accounts (name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions, platform, metadata) 
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	
 	markEveryoneOrder := 0
 	if account.MarkEveryoneOrder {
@@ -53,7 +65,8 @@ func (am *AccountManager) AddAccount(account *BybitAccount) error {
 	_, err := am.db.GetDB().Exec(query, account.Name, account.APIKey, account.APISecret,
 		account.WebhookURL, active, markEveryoneOrder, markEveryoneWallet,
 		account.WebhookURLGoogleSheets, account.SheetURLGoogleSheets,
-		account.WebhookURLExecutions, markEveryoneExecution, account.SheetURLGoogleSheetsExecutions)
+		account.WebhookURLExecutions, markEveryoneExecution, account.SheetURLGoogleSheetsExecutions,
+		platform, metadata)
 	return err
 }
 
@@ -69,7 +82,7 @@ func (am *AccountManager) RemoveAccount(id int64) error {
 }
 
 func (am *AccountManager) ListAccounts() ([]*BybitAccount, error) {
-	query := `SELECT id, name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions 
+	query := `SELECT id, name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions, platform, metadata 
 	          FROM bybit_accounts ORDER BY id`
 	
 	rows, err := am.db.GetDB().Query(query)
@@ -85,7 +98,8 @@ func (am *AccountManager) ListAccounts() ([]*BybitAccount, error) {
 		err := rows.Scan(&acc.ID, &acc.Name, &acc.APIKey, &acc.APISecret,
 			&acc.WebhookURL, &active, &markEveryoneOrder, &markEveryoneWallet,
 			&acc.WebhookURLGoogleSheets, &acc.SheetURLGoogleSheets,
-			&acc.WebhookURLExecutions, &markEveryoneExecution, &acc.SheetURLGoogleSheetsExecutions)
+			&acc.WebhookURLExecutions, &markEveryoneExecution, &acc.SheetURLGoogleSheetsExecutions,
+			&acc.Platform, &acc.Metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -93,6 +107,9 @@ func (am *AccountManager) ListAccounts() ([]*BybitAccount, error) {
 		acc.MarkEveryoneOrder = markEveryoneOrder == 1
 		acc.MarkEveryoneWallet = markEveryoneWallet == 1
 		acc.MarkEveryoneExecution = markEveryoneExecution == 1
+		if acc.Platform == "" {
+			acc.Platform = "bybit"
+		}
 		accounts = append(accounts, acc)
 	}
 
@@ -100,7 +117,7 @@ func (am *AccountManager) ListAccounts() ([]*BybitAccount, error) {
 }
 
 func (am *AccountManager) GetAccount(id int64) (*BybitAccount, error) {
-	query := `SELECT id, name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions 
+	query := `SELECT id, name, api_key, api_secret, webhook_url, active, mark_everyone_order, mark_everyone_wallet, webhook_url_google_sheets, sheet_url_google_sheets, webhook_url_executions, mark_everyone_execution, sheet_url_google_sheets_executions, platform, metadata 
 	          FROM bybit_accounts WHERE id = ?`
 	
 	acc := &BybitAccount{}
@@ -109,7 +126,8 @@ func (am *AccountManager) GetAccount(id int64) (*BybitAccount, error) {
 		&acc.ID, &acc.Name, &acc.APIKey, &acc.APISecret,
 		&acc.WebhookURL, &active, &markEveryoneOrder, &markEveryoneWallet,
 		&acc.WebhookURLGoogleSheets, &acc.SheetURLGoogleSheets,
-		&acc.WebhookURLExecutions, &markEveryoneExecution, &acc.SheetURLGoogleSheetsExecutions)
+		&acc.WebhookURLExecutions, &markEveryoneExecution, &acc.SheetURLGoogleSheetsExecutions,
+		&acc.Platform, &acc.Metadata)
 	
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -122,6 +140,9 @@ func (am *AccountManager) GetAccount(id int64) (*BybitAccount, error) {
 	acc.MarkEveryoneOrder = markEveryoneOrder == 1
 	acc.MarkEveryoneWallet = markEveryoneWallet == 1
 	acc.MarkEveryoneExecution = markEveryoneExecution == 1
+	if acc.Platform == "" {
+		acc.Platform = "bybit"
+	}
 	return acc, nil
 }
 
@@ -157,7 +178,8 @@ func (am *AccountManager) GetActiveConnections() ([]int64, error) {
 	return accountIDs, rows.Err()
 }
 
-func (am *AccountManager) UpdateAccount(id int64, name, webhookURL string, markEveryoneOrder, markEveryoneWallet bool, webhookURLGoogleSheets, sheetURLGoogleSheets, webhookURLExecutions, sheetURLGoogleSheetsExecutions string, markEveryoneExecution bool) error {
+// UpdateAccount atualiza a conta. platform não é alterado. apiKey e apiSecret são persistidos; metadata pode ser passado para atualizar (ex.: passphrase OKX); use "" para manter o atual.
+func (am *AccountManager) UpdateAccount(id int64, name, apiKey, apiSecret, webhookURL string, markEveryoneOrder, markEveryoneWallet bool, webhookURLGoogleSheets, sheetURLGoogleSheets, webhookURLExecutions, sheetURLGoogleSheetsExecutions string, markEveryoneExecution bool, metadata string) error {
 	markEveryoneOrderInt := 0
 	if markEveryoneOrder {
 		markEveryoneOrderInt = 1
@@ -170,9 +192,15 @@ func (am *AccountManager) UpdateAccount(id int64, name, webhookURL string, markE
 	if markEveryoneExecution {
 		markEveryoneExecutionInt = 1
 	}
-	
-	query := `UPDATE bybit_accounts SET name = ?, webhook_url = ?, mark_everyone_order = ?, mark_everyone_wallet = ?, webhook_url_google_sheets = ?, sheet_url_google_sheets = ?, webhook_url_executions = ?, mark_everyone_execution = ?, sheet_url_google_sheets_executions = ? WHERE id = ?`
-	_, err := am.db.GetDB().Exec(query, name, webhookURL, markEveryoneOrderInt, markEveryoneWalletInt, webhookURLGoogleSheets, sheetURLGoogleSheets, webhookURLExecutions, markEveryoneExecutionInt, sheetURLGoogleSheetsExecutions, id)
+
+	// Se metadata foi passado (não é o sentinel "keep"), atualizar; senão fazer UPDATE sem metadata
+	if metadata != "" {
+		query := `UPDATE bybit_accounts SET name = ?, api_key = ?, api_secret = ?, webhook_url = ?, mark_everyone_order = ?, mark_everyone_wallet = ?, webhook_url_google_sheets = ?, sheet_url_google_sheets = ?, webhook_url_executions = ?, mark_everyone_execution = ?, sheet_url_google_sheets_executions = ?, metadata = ? WHERE id = ?`
+		_, err := am.db.GetDB().Exec(query, name, apiKey, apiSecret, webhookURL, markEveryoneOrderInt, markEveryoneWalletInt, webhookURLGoogleSheets, sheetURLGoogleSheets, webhookURLExecutions, markEveryoneExecutionInt, sheetURLGoogleSheetsExecutions, metadata, id)
+		return err
+	}
+	query := `UPDATE bybit_accounts SET name = ?, api_key = ?, api_secret = ?, webhook_url = ?, mark_everyone_order = ?, mark_everyone_wallet = ?, webhook_url_google_sheets = ?, sheet_url_google_sheets = ?, webhook_url_executions = ?, mark_everyone_execution = ?, sheet_url_google_sheets_executions = ? WHERE id = ?`
+	_, err := am.db.GetDB().Exec(query, name, apiKey, apiSecret, webhookURL, markEveryoneOrderInt, markEveryoneWalletInt, webhookURLGoogleSheets, sheetURLGoogleSheets, webhookURLExecutions, markEveryoneExecutionInt, sheetURLGoogleSheetsExecutions, id)
 	return err
 }
 
