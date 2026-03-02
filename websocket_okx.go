@@ -646,6 +646,7 @@ func okxOrderToBybit(obj map[string]interface{}, symbol string) (orderData Order
 			}
 		case "filled", "partially_filled":
 			// Stop executado → marcar como CreateByStopOrder para não duplicar notificação de ordem
+			orderStatus = "Triggered"
 			createType = "CreateByStopOrder"
 			isStopTriggeredFill = true
 		}
@@ -689,9 +690,7 @@ func (wsm *WebSocketManager) processOKXOrders(wsConn *WebSocketConnection, dataS
 		side, _ := obj["side"].(string)
 		ordType, _ := obj["ordType"].(string)
 		fillSz, _ := obj["fillSz"].(string)
-		fillNotionalUsd, _ := obj["fillNotionalUsd"].(string)
 		fillPx, _ := obj["fillPx"].(string)
-		avgPx, _ := obj["avgPx"].(string)
 		fillTime, _ := obj["fillTime"].(string)
 		tradeId, _ := obj["tradeId"].(string)
 
@@ -705,23 +704,18 @@ func (wsm *WebSocketManager) processOKXOrders(wsConn *WebSocketConnection, dataS
 
 		// Execução: quando há fill (tradeId + fillSz/fillPx). Para exibição em USD usamos fillNotionalUsd se disponível.
 		execQty := fillSz
-		if fillNotionalUsd != "" {
-			execQty = fillNotionalUsd
-		}
+
 		if (state == "filled" || state == "partially_filled") && tradeId != "" && execQty != "" && fillPx != "" {
 
-			// Limitar casas decimais conforme especificado (8 casas decimais)
-			fillNotionalUsdF, _ := strconv.ParseFloat(fillNotionalUsd, 64)
-			avgPxF, _ := strconv.ParseFloat(avgPx, 64)
+			execQtyF, _ := strconv.ParseFloat(execQty, 64)
+			execQtyF = execQtyF * okxContractValueUsd
+			fillPxF, _ := strconv.ParseFloat(fillPx, 64)
 			execValue := "0"
-			if avgPxF != 0 {
-				execValue = strconv.FormatFloat(fillNotionalUsdF/avgPxF, 'f', 8, 64)
-			} else {
-				fillPxF, _ := strconv.ParseFloat(fillPx, 64)
-				if fillPxF != 0 {
-					execValue = strconv.FormatFloat(fillNotionalUsdF/fillPxF, 'f', 8, 64)
-				}
+			if fillPxF != 0 {
+				execValue = strconv.FormatFloat(execQtyF/fillPxF, 'f', 8, 64)
 			}
+
+			execQty = strconv.Itoa(int(execQtyF))
 			
 			createType := ""
 
