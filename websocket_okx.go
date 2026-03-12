@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,6 +18,12 @@ import (
 const okxPrivateWSURL = "wss://ws.okx.com:8443/ws/v5/private"
 const okxBusinessWSURL = "wss://ws.okx.com:8443/ws/v5/business"
 const okxContractValueUsd = 100
+
+// okxBusinessRunner: garante uma única goroutine de conexão business por conta e evita duplicação.
+var (
+	okxBusinessMu      sync.Mutex
+	okxBusinessRunning = make(map[int64]bool) // accountID -> runner ativo
+)
 
 // okxMetadata representa o JSON em metadata para OKX (passphrase).
 type okxMetadata struct {
@@ -100,7 +107,8 @@ func (wsm *WebSocketManager) connectAndListenOKX(wsConn *WebSocketConnection, su
 	}
 
 	// Conexão paralela ao endpoint business para canal orders-algo (stops).
-	go wsm.connectAndListenOKXBusiness(wsConn, passphrase)
+	// Só inicia se ainda não houver runner para esta conta; se a principal caiu e reconectou e a business segue ativa, não duplica.
+	wsm.ensureOKXBusinessConnection(wsConn, passphrase)
 
 	if successChan != nil {
 		select {
@@ -219,8 +227,106 @@ func (wsm *WebSocketManager) subscribeOKXBusiness(conn *websocket.Conn) error {
 	return conn.WriteJSON(msg)
 }
 
+// ensureOKXBusinessConnection inicia a goroutine de conexão business (orders-algo) apenas se ainda não
+// existir uma runner para esta conta. Se a conexão principal cair e reconectar, e a business ainda
+// estiver ativa, não duplica. A runner faz retry independente quando a conexão business cair.
+func (wsm *WebSocketManager) ensureOKXBusinessConnection(wsConn *WebSocketConnection, passphrase string) {
+	okxBusinessMu.Lock()
+	if okxBusinessRunning[wsConn.AccountID] {
+		okxBusinessMu.Unlock()
+		return
+	}
+	okxBusinessRunning[wsConn.AccountID] = true
+	okxBusinessMu.Unlock()
+
+	go wsm.runOKXBusinessWithRetry(wsConn, passphrase)
+}
+
+// runOKXBusinessWithRetry mantém a conexão OKX business com o mesmo processo de reconexão da principal
+// (backoff exponencial, retries). Sai apenas quando wsConn.StopChan for fechado.
+func (wsm *WebSocketManager) runOKXBusinessWithRetry(wsConn *WebSocketConnection, passphrase string) {
+	defer func() {
+		okxBusinessMu.Lock()
+		delete(okxBusinessRunning, wsConn.AccountID)
+		okxBusinessMu.Unlock()
+	}()
+
+	logger, _ := getLogger(wsConn.AccountID, wsConn.Account.Name)
+	retryDelay := 5 * time.Second
+	maxRetryDelay := 1 * time.Minute
+	initialRetryDelay := retryDelay
+	consecutiveFailures := 0
+	const maxConsecutiveFailures = 10
+
+	for {
+		select {
+		case <-wsConn.StopChan:
+			return
+		default:
+		}
+
+		var stopped, wasConnected bool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[PANIC] OKX business para conta %d: %v\n", wsConn.AccountID, r)
+					if logger != nil {
+						logger.Log("PANIC na conexão OKX business (reiniciando fluxo de reconexão): %v", r)
+					}
+					stopped = false
+					wasConnected = true
+				}
+			}()
+			stopped, wasConnected = wsm.connectAndListenOKXBusiness(wsConn, passphrase)
+		}()
+		if stopped {
+			return
+		}
+
+		select {
+		case <-wsConn.StopChan:
+			return
+		default:
+		}
+
+		if wasConnected {
+			consecutiveFailures = 0
+			retryDelay = initialRetryDelay
+		} else {
+			consecutiveFailures++
+		}
+		if logger != nil {
+			logger.Log("Conexão OKX business caiu, reconectando em %v (falhas consecutivas: %d)...", retryDelay, consecutiveFailures)
+		}
+
+		if consecutiveFailures >= maxConsecutiveFailures {
+			if logger != nil {
+				logger.Log("Muitas falhas consecutivas na OKX business (%d), aguardando 30s antes de reconectar...", consecutiveFailures)
+			}
+			consecutiveFailures = 0
+			retryDelay = initialRetryDelay
+			select {
+			case <-wsConn.StopChan:
+				return
+			case <-time.After(30 * time.Second):
+			}
+			continue
+		}
+
+		select {
+		case <-wsConn.StopChan:
+			return
+		case <-time.After(retryDelay):
+			if retryDelay < maxRetryDelay {
+				retryDelay *= 2
+			}
+		}
+	}
+}
+
 // connectAndListenOKXBusiness conecta ao WebSocket business da OKX, faz login, inscreve em orders-algo e lê mensagens.
-func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnection, passphrase string) {
+// Retorna (stopped=true) se saiu por StopChan; (stopped=false, wasConnected=X) se saiu por erro (wasConnected indica se já tinha conectado, para resetar backoff).
+func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnection, passphrase string) (stopped bool, wasConnected bool) {
 	logger, _ := getLogger(wsConn.AccountID, wsConn.Account.Name)
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(okxBusinessWSURL, nil)
@@ -228,7 +334,7 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 		if logger != nil {
 			logger.Log("Erro ao conectar OKX business: %v", err)
 		}
-		return
+		return false, false
 	}
 	defer conn.Close()
 
@@ -236,7 +342,7 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 		if logger != nil {
 			logger.Log("Erro no login OKX business: %v", err)
 		}
-		return
+		return false, false
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -244,7 +350,7 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 		if logger != nil {
 			logger.Log("Erro ao inscrever OKX business orders-algo: %v", err)
 		}
-		return
+		return false, false
 	}
 
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -259,26 +365,26 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 	for {
 		select {
 		case <-wsConn.StopChan:
-			return
+			return true, false
 		default:
 			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			messageType, message, err := conn.ReadMessage()
 			if err != nil {
 				select {
 				case <-wsConn.StopChan:
-					return
+					return true, false
 				default:
 				}
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					if logger != nil {
 						logger.Log("Conexão OKX business fechada normalmente")
 					}
-					return
+					return false, true
 				}
 				if logger != nil {
 					logger.Log("Erro na leitura OKX business: %v", err)
 				}
-				return
+				return false, true
 			}
 			if messageType != websocket.TextMessage {
 				continue
