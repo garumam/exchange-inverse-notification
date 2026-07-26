@@ -17,7 +17,6 @@ import (
 
 const okxPrivateWSURL = "wss://ws.okx.com:8443/ws/v5/private"
 const okxBusinessWSURL = "wss://ws.okx.com:8443/ws/v5/business"
-const okxContractValueUsd = 100
 
 // okxBusinessRunner: garante uma única goroutine de conexão business por conta e evita duplicação.
 var (
@@ -500,7 +499,7 @@ func okxAlgoOrderToBybit(obj map[string]interface{}) (OrderData, bool) {
 	symbol := okxInstIdToSymbol(instId)
 	qty := notionalUsd
 	if qty == "" {
-		qty = sz
+		qty = okxContractsToUsd(sz, instId)
 	}
 	triggerPrice := triggerPx
 	if triggerPrice == "" && slTriggerPx != "" {
@@ -599,14 +598,23 @@ func okxSideToBybit(side string) string {
 	return side
 }
 
-func okxNormalizePositionNumber(pos string) string {
-	clean := strings.ReplaceAll(pos, "-", "")
+// okxContractValueForInst retorna o valor em USD de 1 contrato inverse OKX.
+// BTC = 100 USD; demais moedas (ex.: ETH) = 10 USD.
+func okxContractValueForInst(instId string) float64 {
+	if strings.HasPrefix(strings.ToUpper(instId), "BTC") {
+		return 100
+	}
+	return 10
+}
+
+// okxContractsToUsd converte quantidade em contratos OKX para USD (valor absoluto).
+func okxContractsToUsd(contracts, instId string) string {
+	clean := strings.ReplaceAll(contracts, "-", "")
 	f, err := strconv.ParseFloat(clean, 64)
 	if err != nil {
-		return "0" // ou outro valor default em caso de erro
+		return "0"
 	}
-	result := f * float64(okxContractValueUsd)
-	return strconv.FormatFloat(result, 'f', -1, 64)
+	return strconv.FormatFloat(f*okxContractValueForInst(instId), 'f', -1, 64)
 }
 
 func okxPositionSideToBybit(side string, pos string) string {
@@ -702,12 +710,17 @@ func (wsm *WebSocketManager) processOKXPositions(wsConn *WebSocketConnection, da
 		side := okxPositionSideToBybit(posSide, pos)
 		avgPx, _ := obj["avgPx"].(string)
 		markPx, _ := obj["markPx"].(string)
+		notionalUsd, _ := obj["notionalUsd"].(string)
+		size := notionalUsd
+		if size == "" {
+			size = okxContractsToUsd(pos, instId)
+		}
 
 		symbol := okxInstIdToSymbol(instId)
 		positions = append(positions, PositionData{
 			Symbol:        symbol,
 			Side:          side,
-			Size:          okxNormalizePositionNumber(pos),
+			Size:          size,
 			EntryPrice:    avgPx,
 			MarkPrice:     markPx,
 			Category:      "inverse",
@@ -731,6 +744,7 @@ func okxOrderToBybit(obj map[string]interface{}, symbol string) (orderData Order
 	ordType, _ := obj["ordType"].(string)
 	px, _ := obj["px"].(string)
 	avgPx, _ := obj["avgPx"].(string)
+	instId, _ := obj["instId"].(string)
 	notionalUsd, _ := obj["notionalUsd"].(string)
 	sz, _ := obj["sz"].(string)
 	cTime, _ := obj["cTime"].(string)
@@ -743,7 +757,7 @@ func okxOrderToBybit(obj map[string]interface{}, symbol string) (orderData Order
 
 	qty := notionalUsd
 	if qty == "" {
-		qty = sz
+		qty = okxContractsToUsd(sz, instId)
 	}
 
 	orderStatus := okxStateToOrderStatus(state)
@@ -835,27 +849,29 @@ func (wsm *WebSocketManager) processOKXOrders(wsConn *WebSocketConnection, dataS
 			orders = append(orders, orderData)
 		}
 
-		// Execução: quando há fill (tradeId + fillSz/fillPx). Para exibição em USD usamos fillNotionalUsd se disponível.
-		execQty := fillSz
-
-		if (state == "filled" || state == "partially_filled") && tradeId != "" && execQty != "" && fillPx != "" {
+		// Execução: quando há fill (tradeId + fillSz/fillPx). Preferir fillNotionalUsd; fallback = contratos × valor do contrato.
+		if (state == "filled" || state == "partially_filled") && tradeId != "" && fillSz != "" && fillPx != "" {
+			fillNotionalUsd, _ := obj["fillNotionalUsd"].(string)
+			execQty := fillNotionalUsd
+			if execQty == "" {
+				execQty = okxContractsToUsd(fillSz, instId)
+			}
 
 			execQtyF, _ := strconv.ParseFloat(execQty, 64)
-			execQtyF = execQtyF * okxContractValueUsd
 			fillPxF, _ := strconv.ParseFloat(fillPx, 64)
 			execValue := "0"
 			if fillPxF != 0 {
 				execValue = strconv.FormatFloat(execQtyF/fillPxF, 'f', 8, 64)
 			}
 
-			execQty = strconv.Itoa(int(execQtyF))
-			
+			execQty = strconv.FormatFloat(execQtyF, 'f', -1, 64)
+
 			createType := ""
 
 			if isStopTriggeredFill {
 				createType = "CreateByStopOrder"
 			}
-			
+
 			executions = append(executions, ExecutionData{
 				Category:   "inverse",
 				Symbol:     symbol,
@@ -870,7 +886,6 @@ func (wsm *WebSocketManager) processOKXOrders(wsConn *WebSocketConnection, dataS
 				CreateType: createType,
 			})
 		}
-		_ = isStopTriggeredFill
 	}
 	if len(orders) > 0 {
 		msg := BybitOrderMessage{Data: orders}
