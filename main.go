@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const projectVersion = "v0.0.6"
+const projectVersion = "v0.0.7"
 
 func main() {
 	db, err := NewDatabase()
