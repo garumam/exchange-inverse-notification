@@ -226,6 +226,100 @@ func (wsm *WebSocketManager) subscribeOKXBusiness(conn *websocket.Conn) error {
 	return conn.WriteJSON(msg)
 }
 
+func okxJSONStringField(msg map[string]interface{}, key string) string {
+	switch v := msg[key].(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// waitOKXSubscribeAck aguarda confirmação de subscribe para o canal informado.
+func waitOKXSubscribeAck(conn *websocket.Conn, channel string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(time.Until(deadline)))
+		var resp map[string]interface{}
+		if err := conn.ReadJSON(&resp); err != nil {
+			return fmt.Errorf("erro ao ler resposta do subscribe: %w", err)
+		}
+		event, _ := resp["event"].(string)
+		switch event {
+		case "error":
+			code := okxJSONStringField(resp, "code")
+			msg, _ := resp["msg"].(string)
+			return fmt.Errorf("subscribe OKX falhou: %s %s", code, msg)
+		case "subscribe":
+			arg, _ := resp["arg"].(map[string]interface{})
+			ch, _ := arg["channel"].(string)
+			if ch == channel {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("timeout aguardando confirmação de subscribe para %s", channel)
+}
+
+// subscribeOKXBusinessAndWait inscreve em orders-algo e aguarda ACK da OKX.
+func (wsm *WebSocketManager) subscribeOKXBusinessAndWait(conn *websocket.Conn, logger interface{ Log(string, ...interface{}) }) error {
+	if err := wsm.subscribeOKXBusiness(conn); err != nil {
+		return err
+	}
+	if err := waitOKXSubscribeAck(conn, "orders-algo", 10*time.Second); err != nil {
+		return err
+	}
+	if logger != nil {
+		logger.Log("OKX business orders-algo inscrito com sucesso")
+	}
+	return nil
+}
+
+// isOKXBusinessControlMessage indica se a mensagem é evento de controle (não dados de push).
+func isOKXBusinessControlMessage(raw []byte) bool {
+	var generic map[string]interface{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return false
+	}
+	event, _ := generic["event"].(string)
+	switch event {
+	case "login", "subscribe", "unsubscribe", "error", "channel-conn-count", "channel-conn-count-error":
+		return true
+	default:
+		return false
+	}
+}
+
+// handleOKXBusinessControl processa eventos de controle do endpoint business.
+// Retorna true quando a conexão deve ser reiniciada.
+func handleOKXBusinessControl(raw []byte, logger interface{ Log(string, ...interface{}) }) (reconnect bool) {
+	var generic map[string]interface{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return false
+	}
+	event, _ := generic["event"].(string)
+	switch event {
+	case "error":
+		code := okxJSONStringField(generic, "code")
+		msg, _ := generic["msg"].(string)
+		if logger != nil {
+			logger.Log("OKX business error %s: %s, reconectando...", code, msg)
+		}
+		return true
+	case "channel-conn-count-error":
+		if logger != nil {
+			logger.Log("OKX business channel-conn-count-error, reconectando...")
+		}
+		return true
+	case "subscribe", "login", "unsubscribe", "channel-conn-count":
+		return false
+	default:
+		return false
+	}
+}
+
 // ensureOKXBusinessConnection inicia a goroutine de conexão business (orders-algo) apenas se ainda não
 // existir uma runner para esta conta. Se a conexão principal cair e reconectar, e a business ainda
 // estiver ativa, não duplica. A runner faz retry independente quando a conexão business cair.
@@ -345,7 +439,7 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	if err := wsm.subscribeOKXBusiness(conn); err != nil {
+	if err := wsm.subscribeOKXBusinessAndWait(conn, logger); err != nil {
 		if logger != nil {
 			logger.Log("Erro ao inscrever OKX business orders-algo: %v", err)
 		}
@@ -386,6 +480,12 @@ func (wsm *WebSocketManager) connectAndListenOKXBusiness(wsConn *WebSocketConnec
 				return false, true
 			}
 			if messageType != websocket.TextMessage {
+				continue
+			}
+			if isOKXBusinessControlMessage(message) {
+				if handleOKXBusinessControl(message, logger) {
+					return false, true
+				}
 				continue
 			}
 			wsm.handleOKXAlgoMessage(wsConn, message, logger)
@@ -440,10 +540,6 @@ func (wsm *WebSocketManager) handleOKXMessage(wsConn *WebSocketConnection, raw [
 func (wsm *WebSocketManager) handleOKXAlgoMessage(wsConn *WebSocketConnection, raw []byte, logger interface{ Log(string, ...interface{}) }) {
 	var generic map[string]interface{}
 	if err := json.Unmarshal(raw, &generic); err != nil {
-		return
-	}
-	event, _ := generic["event"].(string)
-	if event == "login" || event == "subscribe" || event == "unsubscribe" || event == "error" || event == "channel-conn-count" || event == "channel-conn-count-error" {
 		return
 	}
 	arg, _ := generic["arg"].(map[string]interface{})
@@ -643,6 +739,8 @@ func okxOrdTypeToBybit(ordType string) string {
 		return "Limit"
 	case "market":
 		return "Market"
+	case "post_only":
+		return "Limit"
 	default:
 		return ordType
 	}
