@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2062,7 +2060,7 @@ func (wsm *WebSocketManager) processSheetsNotification(accountID int64) {
 	sheetURL := wsConn.Account.SheetURLGoogleSheets
 	go func() {
 		for _, p := range webhookPayloads {
-			if err := sendGoogleSheetsWebhook(webhookURL, sheetURL, p.coin, p.columns, p.headers); err != nil {
+			if err := sendGoogleSheetsWebhook(wsConn.AccountID, webhookURL, sheetURL, p.coin, p.columns, p.headers); err != nil {
 				if logger != nil {
 					logger.Log("Erro ao enviar webhook do Google Sheets para %s: %v", p.coin, err)
 				}
@@ -2150,7 +2148,7 @@ func (wsm *WebSocketManager) flushExecutions(wsConn *WebSocketConnection, execut
 			execsCopy := make([]ExecutionData, len(execs))
 			copy(execsCopy, execs)
 			go func() {
-				if err := wsm.sendGoogleSheetsExecutionWebhook(webhookURL, sheetURLExec, coinCopy, execsCopy); err != nil && logger != nil {
+				if err := wsm.sendGoogleSheetsExecutionWebhook(wsConn.AccountID, webhookURL, sheetURLExec, coinCopy, execsCopy); err != nil && logger != nil {
 					logger.Log("Erro ao enviar webhook de execuções para %s: %v", coinCopy, err)
 				}
 			}()
@@ -2173,7 +2171,7 @@ func (wsm *WebSocketManager) sendExecutionNotification(wsConn *WebSocketConnecti
 	}
 
 	discordMsg := fmt.Sprintf("%s🔔 Execuções\n%s", everyoneTag, messageText)
-	if err := sendDiscordWebhook(wsConn.Account.WebhookURLExecutions, discordMsg); err != nil {
+	if err := sendDiscordWebhook(wsConn.AccountID, wsConn.Account.WebhookURLExecutions, discordMsg); err != nil {
 		logger, _ := getLogger(wsConn.AccountID, wsConn.Account.Name)
 		if logger != nil {
 			logger.Log("Erro ao enviar webhook de execuções: %v", err)
@@ -2186,7 +2184,7 @@ type ExecutionRow struct {
 	Columns []interface{} `json:"columns"`
 }
 
-func (wsm *WebSocketManager) sendGoogleSheetsExecutionWebhook(webhookURL, sheetURLExecutions, coin string, executions []ExecutionData) error {
+func (wsm *WebSocketManager) sendGoogleSheetsExecutionWebhook(accountID int64, webhookURL, sheetURLExecutions, coin string, executions []ExecutionData) error {
 	if webhookURL == "" || sheetURLExecutions == "" {
 		return fmt.Errorf("webhook URL ou sheet URL execuções está vazia")
 	}
@@ -2227,13 +2225,8 @@ func (wsm *WebSocketManager) sendGoogleSheetsExecutionWebhook(webhookURL, sheetU
 	if err != nil {
 		return fmt.Errorf("erro ao serializar payload: %w", err)
 	}
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(jsonData))
-	if err != nil {
-		return fmt.Errorf("erro ao enviar requisição: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("status code: %d", resp.StatusCode)
+	if err := enqueueHTTPSend(accountID, HTTPSendTypeGoogleSheets, webhookURL, string(jsonData)); err != nil {
+		return fmt.Errorf("erro ao enfileirar envio: %w", err)
 	}
 	return nil
 }
@@ -2282,12 +2275,13 @@ func (wsm *WebSocketManager) sendNotificationWithType(wsConn *WebSocketConnectio
 	if wsConn.Account.WebhookURL != "" {
 		// Enviar para Discord em goroutine para não bloquear o fluxo principal
 		// Discord remove quebras de linha no início, então precisamos ter conteúdo antes
+		accountID := wsConn.AccountID
 		webhookURL := wsConn.Account.WebhookURL
 		discordMsg := fmt.Sprintf("%s%s\n%s\n\n%s", everyoneTag, alertIcon, messageText, timeStamp)
 		go func() {
-			if err := sendDiscordWebhook(webhookURL, discordMsg); err != nil {
+			if err := sendDiscordWebhook(accountID, webhookURL, discordMsg); err != nil {
 				if logger != nil {
-					logger.Log("Erro ao enviar webhook, notificação: %s", messageText)
+					logger.Log("Erro ao enviar webhook, notificação: %s | erro: %v", messageText, err)
 				}
 			}
 		}()
@@ -2302,7 +2296,7 @@ func min(a, b int) int {
 	return b
 }
 
-func sendDiscordWebhook(webhookURL, message string) error {
+func sendDiscordWebhook(accountID int64, webhookURL, message string) error {
 	payload := map[string]string{
 		"content": message,
 	}
@@ -2312,17 +2306,27 @@ func sendDiscordWebhook(webhookURL, message string) error {
 		return err
 	}
 
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(jsonData))
-	if err != nil {
+	if err := enqueueHTTPSend(accountID, HTTPSendTypeDiscord, webhookURL, string(jsonData)); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status code: %d", resp.StatusCode)
-	}
-
 	return nil
+}
+
+// isValidHTTPURL verifica se a string é uma URL http/https com host.
+func isValidHTTPURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	matched, _ := regexp.MatchString(`^https?://[^\s/$.?#].[^\s]*$`, raw)
+	return matched
+}
+
+// validateDiscordWebhookURL valida se a URL é http/https válida. Vazio é válido (campo opcional no cadastro).
+func validateDiscordWebhookURL(url string) bool {
+	if url == "" {
+		return true
+	}
+	return isValidHTTPURL(url)
 }
 
 // validateGoogleSheetsWebhookURL valida se a URL do webhook do Google Sheets está no formato correto
@@ -2362,7 +2366,7 @@ func extractSheetID(sheetURL string) (string, error) {
 }
 
 // sendGoogleSheetsWebhook envia dados para o webhook do Google Sheets
-func sendGoogleSheetsWebhook(webhookURL, sheetURL, symbol string, columns []interface{}, headers []string) error {
+func sendGoogleSheetsWebhook(accountID int64, webhookURL, sheetURL, symbol string, columns []interface{}, headers []string) error {
 	if webhookURL == "" || sheetURL == "" {
 		return fmt.Errorf("webhook URL ou sheet URL está vazia")
 	}
@@ -2390,15 +2394,8 @@ func sendGoogleSheetsWebhook(webhookURL, sheetURL, symbol string, columns []inte
 		return fmt.Errorf("erro ao serializar payload: %w", err)
 	}
 
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(jsonData))
-	if err != nil {
-		return fmt.Errorf("erro ao enviar requisição: %w", err)
+	if err := enqueueHTTPSend(accountID, HTTPSendTypeGoogleSheets, webhookURL, string(jsonData)); err != nil {
+		return fmt.Errorf("erro ao enfileirar envio: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("status code: %d", resp.StatusCode)
-	}
-
 	return nil
 }

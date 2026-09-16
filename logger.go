@@ -211,6 +211,19 @@ func (l *Logger) Log(format string, args ...interface{}) {
 	}
 }
 
+// logHTTPQueue grava no sistema de logs padrão da conta (account_{id}.log).
+// Se accountID <= 0, usa o arquivo account_0.log (fila/sistema).
+func logHTTPQueue(accountID int64, format string, args ...interface{}) {
+	if accountID < 0 {
+		accountID = 0
+	}
+	logger, err := getLogger(accountID, "http_queue")
+	if err != nil || logger == nil {
+		return
+	}
+	logger.Log(format, args...)
+}
+
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

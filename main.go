@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const projectVersion = "v0.0.7"
+const projectVersion = "v0.0.8"
 
 func main() {
 	db, err := NewDatabase()
@@ -18,6 +18,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	httpQueue := NewHTTPQueue(db)
+	httpQueue.Start()
 
 	manager := NewAccountManager(db)
 	wsManager := NewWebSocketManager(db, manager)
@@ -56,6 +59,8 @@ func main() {
 		case "9":
 			handleManageSnapshots(wsManager.accountManager, db, scanner)
 		case "10":
+			handleManageHTTPSendQueue(db, scanner)
+		case "11":
 			fmt.Println("Saindo...")
 			return
 		default:
@@ -104,7 +109,8 @@ func showMenu(wsManager *WebSocketManager) {
 	fmt.Println("7. Ver contas monitoradas")
 	fmt.Println("8. Visualizar logs")
 	fmt.Println("9. Gerenciar snapshots do banco")
-	fmt.Println("10. Desligar")
+	fmt.Println("10. Gerenciar fila de envios")
+	fmt.Println("11. Desligar")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("ℹ️  Se a janela for fechada, o monitoramento será pausado")
 	fmt.Println("   automaticamente.")
@@ -244,6 +250,10 @@ func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, pla
 	if webhookURL == "cancelar" || webhookURL == "0" {
 		return
 	}
+	if webhookURL != "" && !validateDiscordWebhookURL(webhookURL) {
+		fmt.Println("URL inválida, campo ignorado.")
+		webhookURL = ""
+	}
 
 	fmt.Print("Marcar @everyone em notificações de ordens? (sim/s ou não/n, padrão: não): ")
 	scanner.Scan()
@@ -267,6 +277,10 @@ func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, pla
 	if webhookURLExecutions == "cancelar" || webhookURLExecutions == "0" {
 		return
 	}
+	if webhookURLExecutions != "" && !validateDiscordWebhookURL(webhookURLExecutions) {
+		fmt.Println("URL inválida, campo ignorado.")
+		webhookURLExecutions = ""
+	}
 
 	fmt.Print("Marcar @everyone em notificações de execuções? (sim/s ou não/n, padrão: não): ")
 	scanner.Scan()
@@ -282,18 +296,13 @@ func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, pla
 	if webhookURLGoogleSheets == "cancelar" || webhookURLGoogleSheets == "0" {
 		return
 	}
+	if webhookURLGoogleSheets != "" && !validateGoogleSheetsWebhookURL(webhookURLGoogleSheets) {
+		fmt.Println("URL inválida, campo ignorado.")
+		webhookURLGoogleSheets = ""
+	}
 
 	var sheetURLGoogleSheets string
 	if webhookURLGoogleSheets != "" {
-		// Validar webhook URL
-		if !validateGoogleSheetsWebhookURL(webhookURLGoogleSheets) {
-			fmt.Println("Erro: Webhook URL do Google Planilhas inválida!")
-			fmt.Println("Formato esperado: https://script.google.com/macros/s/.../exec")
-			fmt.Println("\nPressione Enter para voltar ao menu principal...")
-			scanner.Scan()
-			return
-		}
-
 		fmt.Print("URL da planilha do Google para receber os dados (obrigatório se webhook do google planilhas foi preenchido): ")
 		scanner.Scan()
 		sheetURLGoogleSheets = strings.TrimSpace(scanner.Text())
@@ -308,13 +317,10 @@ func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, pla
 			return
 		}
 
-		// Validar sheet URL
 		if !validateGoogleSheetsURL(sheetURLGoogleSheets) {
-			fmt.Println("Erro: URL da planilha do Google inválida!")
-			fmt.Println("Formato esperado: https://docs.google.com/spreadsheets/d/.../edit...")
-			fmt.Println("\nPressione Enter para voltar ao menu principal...")
-			scanner.Scan()
-			return
+			fmt.Println("URL inválida, campo ignorado.")
+			sheetURLGoogleSheets = ""
+			webhookURLGoogleSheets = ""
 		}
 	}
 
@@ -327,10 +333,8 @@ func handleAddAccountCommon(manager *AccountManager, scanner *bufio.Scanner, pla
 			return
 		}
 		if sheetURLGoogleSheetsExecutions != "" && !validateGoogleSheetsURL(sheetURLGoogleSheetsExecutions) {
-			fmt.Println("Erro: URL da planilha do Google inválida!")
-			fmt.Println("\nPressione Enter para voltar ao menu principal...")
-			scanner.Scan()
-			return
+			fmt.Println("URL inválida, campo ignorado.")
+			sheetURLGoogleSheetsExecutions = ""
 		}
 	}
 
@@ -658,6 +662,9 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 		newWebhook = account.WebhookURL
 	} else if newWebhook == "remover" {
 		newWebhook = ""
+	} else if !validateDiscordWebhookURL(newWebhook) {
+		fmt.Println("URL inválida, campo ignorado.")
+		newWebhook = ""
 	}
 
 	currentMarkEveryoneOrder := "Não"
@@ -707,15 +714,9 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 		newWebhookURLGoogleSheets = account.WebhookURLGoogleSheets
 	} else if newWebhookURLGoogleSheets == "remover" {
 		newWebhookURLGoogleSheets = ""
-	} else {
-		// Validar webhook URL
-		if !validateGoogleSheetsWebhookURL(newWebhookURLGoogleSheets) {
-			fmt.Println("Erro: Webhook URL do Google Planilhas inválida!")
-			fmt.Println("Formato esperado: https://script.google.com/macros/s/.../exec")
-			fmt.Println("\nPressione Enter para voltar ao menu principal...")
-			scanner.Scan()
-			return
-		}
+	} else if !validateGoogleSheetsWebhookURL(newWebhookURLGoogleSheets) {
+		fmt.Println("URL inválida, campo ignorado.")
+		newWebhookURLGoogleSheets = ""
 	}
 
 	currentSheetURLGoogleSheets := account.SheetURLGoogleSheets
@@ -733,15 +734,9 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 		newSheetURLGoogleSheets = account.SheetURLGoogleSheets
 	} else if newSheetURLGoogleSheets == "remover" {
 		newSheetURLGoogleSheets = ""
-	} else {
-		// Validar sheet URL
-		if !validateGoogleSheetsURL(newSheetURLGoogleSheets) {
-			fmt.Println("Erro: URL da planilha do Google inválida!")
-			fmt.Println("Formato esperado: https://docs.google.com/spreadsheets/d/.../edit...")
-			fmt.Println("\nPressione Enter para voltar ao menu principal...")
-			scanner.Scan()
-			return
-		}
+	} else if !validateGoogleSheetsURL(newSheetURLGoogleSheets) {
+		fmt.Println("URL inválida, campo ignorado.")
+		newSheetURLGoogleSheets = ""
 	}
 
 	// Validar que se webhook URL foi preenchida, sheet URL também deve estar preenchida
@@ -767,6 +762,9 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 	if newWebhookURLExecutions == "" {
 		newWebhookURLExecutions = account.WebhookURLExecutions
 	} else if newWebhookURLExecutions == "remover" {
+		newWebhookURLExecutions = ""
+	} else if !validateDiscordWebhookURL(newWebhookURLExecutions) {
+		fmt.Println("URL inválida, campo ignorado.")
 		newWebhookURLExecutions = ""
 	}
 
@@ -804,11 +802,8 @@ func handleEditAccount(manager *AccountManager, wsManager *WebSocketManager, sca
 	} else if newSheetURLGoogleSheetsExecutions == "remover" {
 		newSheetURLGoogleSheetsExecutions = ""
 	} else if !validateGoogleSheetsURL(newSheetURLGoogleSheetsExecutions) {
-		fmt.Println("Erro: URL da planilha do Google inválida!")
-		fmt.Println("Formato esperado: https://docs.google.com/spreadsheets/d/.../edit...")
-		fmt.Println("\nPressione Enter para voltar ao menu principal...")
-		scanner.Scan()
-		return
+		fmt.Println("URL inválida, campo ignorado.")
+		newSheetURLGoogleSheetsExecutions = ""
 	}
 
 	// Delay de notificação (0 = desligado, 3-20 segundos para agrupar)
@@ -1341,4 +1336,246 @@ func handleManageSnapshots(manager *AccountManager, db *Database, scanner *bufio
 	fmt.Println("\nPressione Enter para voltar ao menu principal...")
 	scanner.Scan()
 }
+
+func handleManageHTTPSendQueue(db *Database, scanner *bufio.Scanner) {
+	for {
+		clearScreen()
+		fmt.Println("=== Gerenciar Fila de Envios ===")
+		fmt.Println("1. Listar por type")
+		fmt.Println("2. Ver linha completa")
+		fmt.Println("3. Reenviar agora")
+		fmt.Println("4. Editar URL da row")
+		fmt.Println("5. Apagar permanentemente")
+		fmt.Println("0. Voltar ao menu principal")
+		fmt.Print("\nEscolha uma opção: ")
+		scanner.Scan()
+		choice := strings.TrimSpace(scanner.Text())
+
+		switch choice {
+		case "0":
+			return
+		case "1":
+			handleListHTTPSendQueue(db, scanner)
+		case "2":
+			handleViewHTTPSendQueueItem(db, scanner)
+		case "3":
+			handleResendHTTPSendQueueItem(db, scanner)
+		case "4":
+			handleEditHTTPSendQueueURL(db, scanner)
+		case "5":
+			handleHardDeleteHTTPSendQueueItem(db, scanner)
+		default:
+		}
+	}
+}
+
+func promptHTTPSendQueueType(scanner *bufio.Scanner) (string, bool) {
+	fmt.Println("Type:")
+	fmt.Println("1. discord")
+	fmt.Println("2. google_sheets")
+	fmt.Println("0. Voltar")
+	fmt.Print("Opção: ")
+	scanner.Scan()
+	opt := strings.TrimSpace(scanner.Text())
+	switch opt {
+	case "1":
+		return HTTPSendTypeDiscord, true
+	case "2":
+		return HTTPSendTypeGoogleSheets, true
+	default:
+		return "", false
+	}
+}
+
+func previewText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func handleListHTTPSendQueue(db *Database, scanner *bufio.Scanner) {
+	clearScreen()
+	fmt.Println("=== Listar fila de envios ===")
+	sendType, ok := promptHTTPSendQueueType(scanner)
+	if !ok {
+		return
+	}
+
+	fmt.Print("Incluir soft-deleted? (s/n, padrão: s): ")
+	scanner.Scan()
+	includeInput := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	includeDeleted := includeInput != "n" && includeInput != "nao" && includeInput != "não"
+
+	items, err := db.ListHTTPSendQueue(sendType, includeDeleted)
+	if err != nil {
+		fmt.Printf("Erro ao listar fila: %v\n", err)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	if len(items) == 0 {
+		fmt.Printf("\nNenhum item na fila type=%s.\n", sendType)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	fmt.Printf("\n=== Itens type=%s (%d) ===\n", sendType, len(items))
+	for _, item := range items {
+		deleted := "ativo"
+		if item.DeletedAt.Valid && item.DeletedAt.String != "" {
+			deleted = "soft-deleted@" + item.DeletedAt.String
+		}
+		fmt.Printf("ID %d | account=%d | attempts=%d | created=%s | %s\n", item.ID, item.AccountID, item.Attempts, item.CreatedAt, deleted)
+		fmt.Printf("  URL: %s\n", previewText(item.URL, 100))
+		fmt.Printf("  Payload: %s\n", previewText(item.Payload, 80))
+		if item.LastError != "" {
+			fmt.Printf("  LastError: %s\n", previewText(item.LastError, 120))
+		}
+		fmt.Println()
+	}
+	fmt.Println("Pressione Enter para voltar...")
+	scanner.Scan()
+}
+
+func promptHTTPSendQueueID(scanner *bufio.Scanner) (int64, bool) {
+	fmt.Print("Digite o ID da row: ")
+	scanner.Scan()
+	var id int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(scanner.Text()), "%d", &id); err != nil || id <= 0 {
+		fmt.Println("ID inválido!")
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return 0, false
+	}
+	return id, true
+}
+
+func handleViewHTTPSendQueueItem(db *Database, scanner *bufio.Scanner) {
+	clearScreen()
+	fmt.Println("=== Ver linha completa ===")
+	id, ok := promptHTTPSendQueueID(scanner)
+	if !ok {
+		return
+	}
+
+	item, err := db.GetHTTPSendQueueItem(id)
+	if err != nil {
+		fmt.Printf("Erro ao buscar item: %v\n", err)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+	if item == nil {
+		fmt.Printf("Item id=%d não encontrado.\n", id)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	deletedAt := "(null)"
+	if item.DeletedAt.Valid {
+		deletedAt = item.DeletedAt.String
+	}
+	fmt.Printf("\nID: %d\n", item.ID)
+	fmt.Printf("AccountID: %d\n", item.AccountID)
+	fmt.Printf("Type: %s\n", item.Type)
+	fmt.Printf("URL: %s\n", item.URL)
+	fmt.Printf("Payload:\n%s\n", item.Payload)
+	fmt.Printf("LastError:\n%s\n", item.LastError)
+	fmt.Printf("Attempts: %d\n", item.Attempts)
+	fmt.Printf("CreatedAt: %s\n", item.CreatedAt)
+	fmt.Printf("DeletedAt: %s\n", deletedAt)
+	fmt.Println("\nPressione Enter para voltar...")
+	scanner.Scan()
+}
+
+func handleResendHTTPSendQueueItem(db *Database, scanner *bufio.Scanner) {
+	clearScreen()
+	fmt.Println("=== Reenviar agora ===")
+	id, ok := promptHTTPSendQueueID(scanner)
+	if !ok {
+		return
+	}
+
+	fmt.Printf("Reenviando item id=%d...\n", id)
+	if err := SendHTTPQueueItemNow(db, id); err != nil {
+		fmt.Printf("Falha no reenvio: %v\n", err)
+	} else {
+		fmt.Println("Reenvio concluído com sucesso (item removido da fila).")
+	}
+	fmt.Println("\nPressione Enter para voltar...")
+	scanner.Scan()
+}
+
+func handleEditHTTPSendQueueURL(db *Database, scanner *bufio.Scanner) {
+	clearScreen()
+	fmt.Println("=== Editar URL da row ===")
+	id, ok := promptHTTPSendQueueID(scanner)
+	if !ok {
+		return
+	}
+
+	item, err := db.GetHTTPSendQueueItem(id)
+	if err != nil {
+		fmt.Printf("Erro ao buscar item: %v\n", err)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+	if item == nil {
+		fmt.Printf("Item id=%d não encontrado.\n", id)
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	fmt.Printf("URL atual: %s\n", item.URL)
+	fmt.Print("Nova URL: ")
+	scanner.Scan()
+	newURL := strings.TrimSpace(scanner.Text())
+	if newURL == "" || newURL == "0" || newURL == "cancelar" {
+		fmt.Println("Operação cancelada.")
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	if err := db.UpdateHTTPSendURL(id, newURL); err != nil {
+		fmt.Printf("Erro ao atualizar URL: %v\n", err)
+	} else {
+		fmt.Println("URL atualizada com sucesso.")
+	}
+	fmt.Println("\nPressione Enter para voltar...")
+	scanner.Scan()
+}
+
+func handleHardDeleteHTTPSendQueueItem(db *Database, scanner *bufio.Scanner) {
+	clearScreen()
+	fmt.Println("=== Apagar permanentemente ===")
+	id, ok := promptHTTPSendQueueID(scanner)
+	if !ok {
+		return
+	}
+
+	fmt.Printf("Apagar permanentemente o item id=%d? (s/n): ", id)
+	scanner.Scan()
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
+		fmt.Println("Operação cancelada.")
+		fmt.Println("\nPressione Enter para voltar...")
+		scanner.Scan()
+		return
+	}
+
+	if err := db.HardDeleteHTTPSend(id); err != nil {
+		fmt.Printf("Erro ao apagar: %v\n", err)
+	} else {
+		fmt.Println("Item apagado permanentemente.")
+	}
+	fmt.Println("\nPressione Enter para voltar...")
+	scanner.Scan()
+}
+
 

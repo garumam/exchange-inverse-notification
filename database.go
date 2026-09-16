@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,24 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const (
+	HTTPSendTypeDiscord      = "discord"
+	HTTPSendTypeGoogleSheets = "google_sheets"
+)
+
+// HTTPSendQueueItem representa uma linha da fila de envios HTTP.
+type HTTPSendQueueItem struct {
+	ID        int64
+	AccountID int64
+	Type      string
+	URL       string
+	Payload   string
+	LastError string
+	Attempts  int
+	CreatedAt string
+	DeletedAt sql.NullString
+}
 
 type Database struct {
 	db *sql.DB
@@ -91,6 +110,24 @@ func (d *Database) initSchema() error {
 		FOREIGN KEY (account_id) REFERENCES bybit_accounts(id) ON DELETE CASCADE
 	);`
 
+	// Fila de envios HTTP (Discord / Google Sheets). INTEGER PRIMARY KEY sem AUTOINCREMENT.
+	createHTTPSendQueueTable := `
+	CREATE TABLE IF NOT EXISTS http_send_queue (
+		id INTEGER PRIMARY KEY,
+		account_id INTEGER NOT NULL DEFAULT 0,
+		type TEXT NOT NULL,
+		url TEXT NOT NULL,
+		payload TEXT NOT NULL,
+		last_error TEXT NOT NULL DEFAULT '',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		deleted_at DATETIME NULL
+	);`
+
+	createHTTPSendQueueIndex := `
+	CREATE INDEX IF NOT EXISTS idx_http_send_queue_type_deleted_id
+	ON http_send_queue (type, deleted_at, id);`
+
 	if _, err := d.db.Exec(createAccountsTable); err != nil {
 		return err
 	}
@@ -104,6 +141,14 @@ func (d *Database) initSchema() error {
 	}
 
 	if _, err := d.db.Exec(createLastMessageSnapshotsTable); err != nil {
+		return err
+	}
+
+	if _, err := d.db.Exec(createHTTPSendQueueTable); err != nil {
+		return err
+	}
+
+	if _, err := d.db.Exec(createHTTPSendQueueIndex); err != nil {
 		return err
 	}
 
@@ -272,6 +317,161 @@ func (d *Database) DeleteLastMessageSnapshot(accountID int64, messageType, symbo
 		`DELETE FROM last_message_snapshots WHERE account_id = ? AND message_type = ? AND symbol = ?`,
 		accountID, messageType, symbol,
 	)
+	return err
+}
+
+func validateHTTPSendQueueURL(sendType, url string) error {
+	if url == "" {
+		return fmt.Errorf("URL vazia")
+	}
+	switch sendType {
+	case HTTPSendTypeDiscord:
+		if !validateDiscordWebhookURL(url) {
+			return fmt.Errorf("URL Discord inválida: %s", url)
+		}
+	case HTTPSendTypeGoogleSheets:
+		if !validateGoogleSheetsWebhookURL(url) {
+			return fmt.Errorf("URL Google Sheets inválida: %s", url)
+		}
+	default:
+		if !isValidHTTPURL(url) {
+			return fmt.Errorf("URL inválida: %s", url)
+		}
+	}
+	return nil
+}
+
+// EnqueueHTTPSend valida a URL e insere um item na fila. Retorna erro sem salvar se a URL for inválida.
+func (d *Database) EnqueueHTTPSend(accountID int64, sendType, url, payload string) (int64, error) {
+	if err := validateHTTPSendQueueURL(sendType, url); err != nil {
+		logHTTPQueue(accountID, "[http_send_queue] enqueue rejeitado (type=%s): %v", sendType, err)
+		return 0, err
+	}
+
+	res, err := d.db.Exec(
+		`INSERT INTO http_send_queue (account_id, type, url, payload, last_error, attempts, created_at, deleted_at)
+		 VALUES (?, ?, ?, ?, '', 0, CURRENT_TIMESTAMP, NULL)`,
+		accountID, sendType, url, payload,
+	)
+	if err != nil {
+		logHTTPQueue(accountID, "[http_send_queue] erro ao inserir na fila (type=%s): %v", sendType, err)
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ClaimNextHTTPSend retorna o próximo item pendente do type (FIFO), ou nil se a fila estiver vazia.
+func (d *Database) ClaimNextHTTPSend(sendType string) (*HTTPSendQueueItem, error) {
+	row := d.db.QueryRow(
+		`SELECT id, account_id, type, url, payload, last_error, attempts, created_at, deleted_at
+		 FROM http_send_queue
+		 WHERE type = ? AND deleted_at IS NULL
+		 ORDER BY id ASC
+		 LIMIT 1`,
+		sendType,
+	)
+	var item HTTPSendQueueItem
+	err := row.Scan(
+		&item.ID, &item.AccountID, &item.Type, &item.URL, &item.Payload,
+		&item.LastError, &item.Attempts, &item.CreatedAt, &item.DeletedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+// MarkHTTPSendSuccess remove permanentemente o item após envio bem-sucedido.
+func (d *Database) MarkHTTPSendSuccess(id int64) error {
+	_, err := d.db.Exec(`DELETE FROM http_send_queue WHERE id = ?`, id)
+	return err
+}
+
+// MarkHTTPSendFailure incrementa attempts, grava last_error e soft-deleta se attempts > 20.
+func (d *Database) MarkHTTPSendFailure(id int64, errText string) error {
+	_, err := d.db.Exec(
+		`UPDATE http_send_queue
+		 SET attempts = attempts + 1,
+		     last_error = ?,
+		     deleted_at = CASE WHEN attempts + 1 > 20 THEN CURRENT_TIMESTAMP ELSE deleted_at END
+		 WHERE id = ?`,
+		errText, id,
+	)
+	return err
+}
+
+// ListHTTPSendQueue lista itens por type. Se includeDeleted for false, omite soft-deleted.
+func (d *Database) ListHTTPSendQueue(sendType string, includeDeleted bool) ([]HTTPSendQueueItem, error) {
+	query := `SELECT id, account_id, type, url, payload, last_error, attempts, created_at, deleted_at
+	          FROM http_send_queue WHERE type = ?`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := d.db.Query(query, sendType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []HTTPSendQueueItem
+	for rows.Next() {
+		var item HTTPSendQueueItem
+		if err := rows.Scan(
+			&item.ID, &item.AccountID, &item.Type, &item.URL, &item.Payload,
+			&item.LastError, &item.Attempts, &item.CreatedAt, &item.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// GetHTTPSendQueueItem retorna um item pelo id.
+func (d *Database) GetHTTPSendQueueItem(id int64) (*HTTPSendQueueItem, error) {
+	row := d.db.QueryRow(
+		`SELECT id, account_id, type, url, payload, last_error, attempts, created_at, deleted_at
+		 FROM http_send_queue WHERE id = ?`,
+		id,
+	)
+	var item HTTPSendQueueItem
+	err := row.Scan(
+		&item.ID, &item.AccountID, &item.Type, &item.URL, &item.Payload,
+		&item.LastError, &item.Attempts, &item.CreatedAt, &item.DeletedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+// UpdateHTTPSendURL valida e atualiza a URL de um item da fila.
+func (d *Database) UpdateHTTPSendURL(id int64, url string) error {
+	item, err := d.GetHTTPSendQueueItem(id)
+	if err != nil {
+		return err
+	}
+	if item == nil {
+		return fmt.Errorf("item id=%d não encontrado", id)
+	}
+	if err := validateHTTPSendQueueURL(item.Type, url); err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`UPDATE http_send_queue SET url = ? WHERE id = ?`, url, id)
+	return err
+}
+
+// HardDeleteHTTPSend remove permanentemente um item da fila.
+func (d *Database) HardDeleteHTTPSend(id int64) error {
+	_, err := d.db.Exec(`DELETE FROM http_send_queue WHERE id = ?`, id)
 	return err
 }
 
