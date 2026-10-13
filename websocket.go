@@ -119,6 +119,7 @@ type ExecutionData struct {
 	CreateType    string `json:"createType"`
 	MarkPrice     string `json:"markPrice"`
 	ExecTime      string `json:"execTime"` // timestamp da execução em ms (API Bybit)
+	MarginMode    string `json:"marginMode,omitempty"` // "cross" | "isolated" | "" (OKX hedge)
 }
 
 type PositionData struct {
@@ -134,6 +135,7 @@ type PositionData struct {
 	TakeProfit      string `json:"takeProfit"`
 	Category        string `json:"category"`
 	PositionStatus  string `json:"positionStatus"`
+	MarginMode      string `json:"marginMode,omitempty"` // "cross" | "isolated" | "" (OKX hedge)
 }
 
 type CoinBalance struct {
@@ -161,6 +163,7 @@ type OrderData struct {
 	StopOrderType string `json:"stopOrderType"`
 	TriggerPrice  string `json:"triggerPrice"`
 	CreateType    string `json:"createType"`
+	MarginMode    string `json:"marginMode,omitempty"` // "cross" | "isolated" | "" (OKX hedge)
 }
 
 func NewWebSocketManager(db *Database, accountManager *AccountManager) *WebSocketManager {
@@ -816,17 +819,18 @@ func formatOrderGroupMessage(wallet *WalletData, groupOrders []OrderData) string
 		orderIcon = "🔴"
 	}
 	if len(groupOrders) == 1 {
-		return fmt.Sprintf("%s Nova ordem aberta - %s %s%s %s @ %s (Qty: %s USD)%s",
-			orderIcon, firstOrder.Symbol, reducePrefix, firstOrder.Side, firstOrder.OrderType, displayPrice, formatPriceCoin(totalQty), pctSuffix)
+		return fmt.Sprintf("%s Nova ordem aberta - %s %s%s %s @ %s (Qty: %s USD)%s%s",
+			orderIcon, firstOrder.Symbol, reducePrefix, firstOrder.Side, firstOrder.OrderType, displayPrice, formatPriceCoin(totalQty), pctSuffix, marginModeSuffix(firstOrder.MarginMode))
 	}
+	modeSuffix := marginModeSuffix(commonMarginMode(groupOrders))
 	if minPrice == maxPrice {
-		return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s @ %s (Qty Total: %s USD)%s",
-			orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol, displayPrice, formatPriceCoin(totalQty), pctSuffix)
+		return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s @ %s (Qty Total: %s USD)%s%s",
+			orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol, displayPrice, formatPriceCoin(totalQty), pctSuffix, modeSuffix)
 	}
 
-	return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s\n   Range: %s até %s (Preço médio: %s)\n   Qty Total: %s USD%s",
+	return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s\n   Range: %s até %s (Preço médio: %s)\n   Qty Total: %s USD%s%s",
 		orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol,
-		formatPriceCoin(minPrice), formatPriceCoin(maxPrice), formatPriceCoin(avgPrice), formatPriceCoin(totalQty), pctSuffix)
+		formatPriceCoin(minPrice), formatPriceCoin(maxPrice), formatPriceCoin(avgPrice), formatPriceCoin(totalQty), pctSuffix, modeSuffix)
 }
 
 // formatOrderMovedMessage formata mensagem de ordem movida (preço alterado). Usado por processDelayBuffer.
@@ -843,8 +847,8 @@ func formatOrderMovedMessage(order OrderData, oldPrice, newPrice float64, wallet
 	}
 	qty, _ := strconv.ParseFloat(order.Qty, 64)
 	pctSuffix := orderPctOfWallet(wallet, order.Symbol, qty)
-	return fmt.Sprintf("📝 %s Ordem movida - %s %s%s %s\n   Preço: %s → %s (Qty: %s USD)%s",
-		orderIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, formatPriceCoin(oldPrice), formatPriceCoin(newPrice), formatPriceCoin(qty), pctSuffix)
+	return fmt.Sprintf("📝 %s Ordem movida - %s %s%s %s%s\n   Preço: %s → %s (Qty: %s USD)%s",
+		orderIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), formatPriceCoin(qty), pctSuffix)
 }
 
 // formatCancelMessage formata mensagem de cancelamentos agrupados.
@@ -859,8 +863,8 @@ func formatCancelMessage(orders []OrderData) string {
 			reducePrefix = "Reduce "
 		}
 		displayPrice := getDisplayPrice(order)
-		parts = append(parts, fmt.Sprintf("  • %s %s%s %s @ %s",
-			order.Symbol, reducePrefix, order.Side, order.OrderType, displayPrice))
+		parts = append(parts, fmt.Sprintf("  • %s %s%s %s @ %s%s",
+			order.Symbol, reducePrefix, order.Side, order.OrderType, displayPrice, marginModeSuffix(order.MarginMode)))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -896,8 +900,8 @@ func formatStopOrderMessage(order OrderData, wallet *WalletData) string {
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("%s Stop %s%s %s - %s @ %s %s%s%s",
-		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, pctSuffix, stopTypeSuffix)
+	return fmt.Sprintf("%s Stop %s%s %s - %s @ %s %s%s%s%s",
+		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, pctSuffix, stopTypeSuffix, marginModeSuffix(order.MarginMode))
 }
 
 // formatStopMovedMessage formata mensagem de stop movido (trigger price alterado). Usado por processDelayBuffer.
@@ -920,8 +924,8 @@ func formatStopMovedMessage(order OrderData, oldPrice, newPrice float64, wallet 
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("📝 %s Stop movido - %s %s%s %s%s\n   Preço: %s → %s %s%s",
-		stopIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, stopTypeSuffix, formatPriceCoin(oldPrice), formatPriceCoin(newPrice), mensagemQty, pctSuffix)
+	return fmt.Sprintf("📝 %s Stop movido - %s %s%s %s%s%s\n   Preço: %s → %s %s%s",
+		stopIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, stopTypeSuffix, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), mensagemQty, pctSuffix)
 }
 
 // formatStopCancellationMessage formata mensagem de stop cancelado (Deactivated).
@@ -954,8 +958,8 @@ func formatStopCancellationMessage(order OrderData) string {
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("❌ %s Stop %s%s %s **CANCELADO** - %s @ %s %s%s",
-		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, stopTypeSuffix)
+	return fmt.Sprintf("❌ %s Stop %s%s %s **CANCELADO** - %s @ %s %s%s%s",
+		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, stopTypeSuffix, marginModeSuffix(order.MarginMode))
 }
 
 // formatStopOrderTypeSuffix retorna o sufixo de tipo de stop para mensagem.
@@ -1589,6 +1593,12 @@ func (wsm *WebSocketManager) handlePositionMessage(wsConn *WebSocketConnection, 
 		messageType := "position"
 		if !oneWayMode && (posData.Side == "Buy" || posData.Side == "Sell") {
 			messageType = "position" + posData.Side
+			switch posData.MarginMode {
+			case "cross":
+				messageType += "Cross"
+			case "isolated":
+				messageType += "Isolated"
+			}
 		}
 		if jsonData, err := json.Marshal(posData); err == nil {
 			if err := wsm.db.SaveLastMessageSnapshot(wsConn.AccountID, messageType, posData.Symbol, string(jsonData)); err != nil && logger != nil {
@@ -1740,7 +1750,11 @@ func (wsm *WebSocketManager) getPositionSnapshotTypes(accountID int64) []string 
 	if err != nil || oneWayMode {
 		return []string{"position"}
 	}
-	return []string{"positionBuy", "positionSell"}
+	return []string{
+		"positionBuy", "positionSell", // legado (sem MarginMode)
+		"positionBuyCross", "positionBuyIsolated",
+		"positionSellCross", "positionSellIsolated",
+	}
 }
 
 func buildPositionsBySymbol(positionRows []PositionSnapshotRow) map[string][]*PositionData {
@@ -1788,6 +1802,108 @@ func calculatePositionValuesByMode(positions []*PositionData, totalEquityCoin fl
 	}
 	expostoUSD = totalEquityCoin - protecaoUSD - longUSD
 	return
+}
+
+// positionsHaveMarginMode indica se alguma position tem cross/isolated (OKX hedge).
+func positionsHaveMarginMode(positions []*PositionData) bool {
+	for _, p := range positions {
+		if p != nil && (p.MarginMode == "cross" || p.MarginMode == "isolated") {
+			return true
+		}
+	}
+	return false
+}
+
+// splitPositionValuesByMargin separa long/proteção por cross e isolated.
+func splitPositionValuesByMargin(positions []*PositionData) (longCross, longIsolated, protCross, protIsolated float64) {
+	for _, position := range positions {
+		if position == nil {
+			continue
+		}
+		size, err := strconv.ParseFloat(position.Size, 64)
+		if err != nil {
+			size = 0
+		}
+		switch position.MarginMode {
+		case "cross":
+			if position.Side == "Sell" {
+				protCross += size
+			} else if position.Side == "Buy" {
+				longCross += size
+			}
+		case "isolated":
+			if position.Side == "Sell" {
+				protIsolated += size
+			} else if position.Side == "Buy" {
+				longIsolated += size
+			}
+		}
+	}
+	return
+}
+
+// formatMarginUSD formata valores cross/isolated para Discord.
+// Ambos zero → "$0 USD (cross e isolated)"; zero de um lado não é exibido.
+func formatMarginUSD(cross, isolated float64) string {
+	if cross <= 0 && isolated <= 0 {
+		return "$0 USD (cross e isolated)"
+	}
+	var parts []string
+	if cross > 0 {
+		parts = append(parts, fmt.Sprintf("$%s USD (cross)", formatPriceCoin(cross)))
+	}
+	if isolated > 0 {
+		parts = append(parts, fmt.Sprintf("$%s USD (isolated)", formatPriceCoin(isolated)))
+	}
+	return strings.Join(parts, " e ")
+}
+
+// formatMarginPct formata % cross/isolated sobre equity.
+func formatMarginPct(crossUSD, isolatedUSD, equity float64) string {
+	if crossUSD <= 0 && isolatedUSD <= 0 {
+		return "0% (cross e isolated)"
+	}
+	var parts []string
+	if crossUSD > 0 {
+		pct := 0.0
+		if equity > 0 {
+			pct = (crossUSD / equity) * 100
+		}
+		parts = append(parts, fmt.Sprintf("%s%% (cross)", formatPriceCoin(pct)))
+	}
+	if isolatedUSD > 0 {
+		pct := 0.0
+		if equity > 0 {
+			pct = (isolatedUSD / equity) * 100
+		}
+		parts = append(parts, fmt.Sprintf("%s%% (isolated)", formatPriceCoin(pct)))
+	}
+	return strings.Join(parts, " e ")
+}
+
+// marginModeSuffix retorna " (cross)" / " (isolated)" ou "" se vazio.
+func marginModeSuffix(mode string) string {
+	if mode == "cross" || mode == "isolated" {
+		return " (" + mode + ")"
+	}
+	return ""
+}
+
+// commonMarginMode retorna o MarginMode comum a todas as ordens, ou "" se misturado/vazio.
+func commonMarginMode(orders []OrderData) string {
+	if len(orders) == 0 {
+		return ""
+	}
+	mode := orders[0].MarginMode
+	if mode != "cross" && mode != "isolated" {
+		return ""
+	}
+	for _, o := range orders[1:] {
+		if o.MarginMode != mode {
+			return ""
+		}
+	}
+	return mode
 }
 
 func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *WebSocketConnection) {
@@ -1856,6 +1972,9 @@ func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *
 	var totalProtecaoUSD float64
 	var totalLongUSD float64
 	var totalExposicaoUSD float64
+	var totalProtCross, totalProtIsolated float64
+	var totalLongCross, totalLongIsolated float64
+	var anyMarginBreakdown bool
 	var coinMessages []string // Mensagens por moeda para usar no else se necessário
 	var totalValidPositions int = 0
 
@@ -1895,6 +2014,17 @@ func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *
 		totalLongUSD += longPosUSD
 		totalExposicaoUSD += expostoPosUSD
 
+		useMarginFmt := positionsHaveMarginMode(symbolPositions)
+		var longCross, longIsolated, protCross, protIsolated float64
+		if useMarginFmt {
+			anyMarginBreakdown = true
+			longCross, longIsolated, protCross, protIsolated = splitPositionValuesByMargin(symbolPositions)
+			totalProtCross += protCross
+			totalProtIsolated += protIsolated
+			totalLongCross += longCross
+			totalLongIsolated += longIsolated
+		}
+
 		// Calcular % protegida para esta posição
 		var percentProtegidaPos float64 = 0.0
 		if protecaoPosUSD > 0 && totalEquityPerCoin > 0 {
@@ -1911,14 +2041,30 @@ func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *
 		var coinMsgParts []string
 		coinMsgParts = append(coinMsgParts, fmt.Sprintf("📌 %s (%s):", coin, symbol))
 		coinMsgParts = append(coinMsgParts, fmt.Sprintf("  💰 Total: $%s USD", formatPriceCoin(totalEquityPerCoin)))
-		coinMsgParts = append(coinMsgParts, fmt.Sprintf("  🛡️ Protegido: $%s USD", formatPriceCoin(protecaoPosUSD)))
+		if useMarginFmt {
+			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  🛡️ Protegido: %s", formatMarginUSD(protCross, protIsolated)))
+		} else {
+			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  🛡️ Protegido: $%s USD", formatPriceCoin(protecaoPosUSD)))
+		}
 		if longPosUSD > 0 {
-			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 Posição Long: $%s USD", formatPriceCoin(longPosUSD)))
+			if useMarginFmt {
+				coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 Posição Long: %s", formatMarginUSD(longCross, longIsolated)))
+			} else {
+				coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 Posição Long: $%s USD", formatPriceCoin(longPosUSD)))
+			}
 		}
 		coinMsgParts = append(coinMsgParts, fmt.Sprintf("  ⚠️ Exposto: $%s USD", formatPriceCoin(expostoPosUSD)))
-		coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 %% Protegida: %s%%", formatPriceCoin(percentProtegidaPos)))
+		if useMarginFmt {
+			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 %% Protegida: %s", formatMarginPct(protCross, protIsolated, totalEquityPerCoin)))
+		} else {
+			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📈 %% Protegida: %s%%", formatPriceCoin(percentProtegidaPos)))
+		}
 		if longPosUSD > 0 {
-			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaPos)))
+			if useMarginFmt {
+				coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📊 %% Longada: %s", formatMarginPct(longCross, longIsolated, totalEquityPerCoin)))
+			} else {
+				coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaPos)))
+			}
 		}
 		coinMsgParts = append(coinMsgParts, "")
 		coinMessages = append(coinMessages, strings.Join(coinMsgParts, "\n"))
@@ -1935,26 +2081,40 @@ func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *
 	if totalValidPositions != 1 {
 		messageParts = append(messageParts, "📊 Resumo Geral:")
 		messageParts = append(messageParts, fmt.Sprintf("  💰 Carteira Total: $%s USD", formatPriceCoin(totalEquity)))
-		messageParts = append(messageParts, fmt.Sprintf("  🛡️ Proteção Total: $%s USD", formatPriceCoin(totalProtecaoUSD)))
+		if anyMarginBreakdown {
+			messageParts = append(messageParts, fmt.Sprintf("  🛡️ Proteção Total: %s", formatMarginUSD(totalProtCross, totalProtIsolated)))
+		} else {
+			messageParts = append(messageParts, fmt.Sprintf("  🛡️ Proteção Total: $%s USD", formatPriceCoin(totalProtecaoUSD)))
+		}
 		if totalLongUSD > 0 {
-			messageParts = append(messageParts, fmt.Sprintf("  📈 Long Total: $%s USD", formatPriceCoin(totalLongUSD)))
+			if anyMarginBreakdown {
+				messageParts = append(messageParts, fmt.Sprintf("  📈 Long Total: %s", formatMarginUSD(totalLongCross, totalLongIsolated)))
+			} else {
+				messageParts = append(messageParts, fmt.Sprintf("  📈 Long Total: $%s USD", formatPriceCoin(totalLongUSD)))
+			}
 		}
 		messageParts = append(messageParts, fmt.Sprintf("  ⚠️ Exposição Total: $%s USD", formatPriceCoin(totalExposicaoUSD)))
 
-		// Calcular % protegida geral
-		var percentProtegidaGeral float64
-		if totalEquity > 0 {
-			percentProtegidaGeral = (totalProtecaoUSD / totalEquity) * 100
-		}
-		messageParts = append(messageParts, fmt.Sprintf("  📈 %% Protegida: %s%%", formatPriceCoin(percentProtegidaGeral)))
-	
-		// Calcular % longada geral
-		if totalLongUSD > 0 {
-			var percentLongadaGeral float64
+		if anyMarginBreakdown {
+			messageParts = append(messageParts, fmt.Sprintf("  📈 %% Protegida: %s", formatMarginPct(totalProtCross, totalProtIsolated, totalEquity)))
+		} else {
+			var percentProtegidaGeral float64
 			if totalEquity > 0 {
-				percentLongadaGeral = (totalLongUSD / totalEquity) * 100
+				percentProtegidaGeral = (totalProtecaoUSD / totalEquity) * 100
 			}
-			messageParts = append(messageParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaGeral)))
+			messageParts = append(messageParts, fmt.Sprintf("  📈 %% Protegida: %s%%", formatPriceCoin(percentProtegidaGeral)))
+		}
+
+		if totalLongUSD > 0 {
+			if anyMarginBreakdown {
+				messageParts = append(messageParts, fmt.Sprintf("  📊 %% Longada: %s", formatMarginPct(totalLongCross, totalLongIsolated, totalEquity)))
+			} else {
+				var percentLongadaGeral float64
+				if totalEquity > 0 {
+					percentLongadaGeral = (totalLongUSD / totalEquity) * 100
+				}
+				messageParts = append(messageParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaGeral)))
+			}
 		}
 	}
 
@@ -2128,8 +2288,12 @@ func (wsm *WebSocketManager) flushExecutions(wsConn *WebSocketConnection, execut
 			if e.CreateType == "CreateByStopOrder" {
 				stopText = "Stop "
 			}
-			parts = append(parts, fmt.Sprintf("%s - %s %s %s%s | Preço: %s | USD: %s",
-				formatExecTimeToBrasilia(e.ExecTime), coin, e.Side, stopText, e.OrderType, formatPriceCoin(price), formatPriceCoin(qtyUsd)))
+			modeText := ""
+			if e.MarginMode == "cross" || e.MarginMode == "isolated" {
+				modeText = " | Mode: " + e.MarginMode
+			}
+			parts = append(parts, fmt.Sprintf("%s - %s %s %s%s | Preço: %s | USD: %s%s",
+				formatExecTimeToBrasilia(e.ExecTime), coin, e.Side, stopText, e.OrderType, formatPriceCoin(price), formatPriceCoin(qtyUsd), modeText))
 		}
 		messageText := strings.Join(parts, "\n")
 		go wsm.sendExecutionNotification(wsConn, messageText)
@@ -2192,7 +2356,7 @@ func (wsm *WebSocketManager) sendGoogleSheetsExecutionWebhook(accountID int64, w
 	if err != nil {
 		return fmt.Errorf("erro ao extrair ID da planilha: %w", err)
 	}
-	headers := []string{"data", "moeda", "operação", "tipo", "preço", "total_moeda", "total_dolar"}
+	headers := []string{"data", "moeda", "operação", "tipo", "preço", "total_moeda", "total_dolar", "mode"}
 	var rows []ExecutionRow
 	for _, e := range executions {
 
@@ -2212,6 +2376,7 @@ func (wsm *WebSocketManager) sendGoogleSheetsExecutionWebhook(accountID int64, w
 			price,
 			valCoin,
 			qtyUsd,
+			e.MarginMode,
 		}
 		rows = append(rows, ExecutionRow{Columns: columns})
 	}

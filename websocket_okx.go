@@ -638,6 +638,13 @@ func okxAlgoOrderToBybit(obj map[string]interface{}) (OrderData, bool) {
 		StopOrderType: okxNormalizeStopOrderType(tpTriggerPx, slTriggerPx),
 		TriggerPrice:  triggerPrice,
 	}
+	// MarginMode só em hedge (posSide long/short)
+	posSide, _ := obj["posSide"].(string)
+	if posSide == "long" || posSide == "short" {
+		if tdMode, _ := obj["tdMode"].(string); tdMode == "cross" || tdMode == "isolated" {
+			orderData.MarginMode = tdMode
+		}
+	}
 	return orderData, true
 }
 
@@ -815,14 +822,21 @@ func (wsm *WebSocketManager) processOKXPositions(wsConn *WebSocketConnection, da
 		}
 
 		symbol := okxInstIdToSymbol(instId)
-		positions = append(positions, PositionData{
-			Symbol:        symbol,
-			Side:          side,
-			Size:          size,
-			EntryPrice:    avgPx,
-			MarkPrice:     markPx,
-			Category:      "inverse",
-		})
+		posData := PositionData{
+			Symbol:     symbol,
+			Side:       side,
+			Size:       size,
+			EntryPrice: avgPx,
+			MarkPrice:  markPx,
+			Category:   "inverse",
+		}
+		// Só preenche MarginMode em hedge (long/short); one-way (net) permanece vazio.
+		if !oneWayMode {
+			if mgnMode, _ := obj["mgnMode"].(string); mgnMode == "cross" || mgnMode == "isolated" {
+				posData.MarginMode = mgnMode
+			}
+		}
+		positions = append(positions, posData)
 	}
 	if len(positions) > 0 {
 		_ = wsm.accountManager.UpdateOneWayMode(wsConn.AccountID, oneWayMode)
@@ -915,6 +929,13 @@ func okxOrderToBybit(obj map[string]interface{}, symbol string) (orderData Order
 		TriggerPrice:  triggerPrice,
 		CreateType:    createType,
 	}
+	// MarginMode só em hedge (posSide long/short)
+	posSide, _ := obj["posSide"].(string)
+	if posSide == "long" || posSide == "short" {
+		if tdMode, _ := obj["tdMode"].(string); tdMode == "cross" || tdMode == "isolated" {
+			orderData.MarginMode = tdMode
+		}
+	}
 	return orderData, isStopTriggeredFill
 }
 
@@ -982,6 +1003,7 @@ func (wsm *WebSocketManager) processOKXOrders(wsConn *WebSocketConnection, dataS
 				OrderType:  okxOrdTypeToBybit(ordType),
 				ExecTime:   fillTime,
 				CreateType: createType,
+				MarginMode: orderData.MarginMode,
 			})
 		}
 	}
