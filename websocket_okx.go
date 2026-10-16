@@ -15,8 +15,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const okxPrivateWSURL = "wss://ws.okx.com:8443/ws/v5/private"
-const okxBusinessWSURL = "wss://ws.okx.com:8443/ws/v5/business"
+const okxPrivateWSURL = "wss://ws.okx.com/ws/v5/private"
+const okxBusinessWSURL = "wss://ws.okx.com/ws/v5/business"
 
 // okxBusinessRunner: garante uma única goroutine de conexão business por conta e evita duplicação.
 var (
