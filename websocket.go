@@ -2074,37 +2074,33 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 	var coinMessages []string // Mensagens por moeda para usar no else se necessário
 	var totalValidPositions int = 0
 
-	// Processar todas as posições para calcular totais e criar mensagens
-	for symbol, symbolPositions := range positionsBySymbol {
-		// Extrair moeda do símbolo (ex: BTCUSD -> BTC, ETHUSD -> ETH)
-		coin := symbol
-		if strings.HasSuffix(symbol, "USD") {
-			coin = symbol[:len(symbol)-3]
-		} else if strings.HasSuffix(symbol, "USDT") {
-			coin = symbol[:len(symbol)-4]
-		} else if strings.HasSuffix(symbol, "USDC") {
-			coin = symbol[:len(symbol)-4]
-		}
-
-		var totalEquityPerCoin float64
-		for _, coinBalance := range lastWallet.Coin {
-			if coinBalance.Coin == coin {
-				equity, err := strconv.ParseFloat(coinBalance.UsdValue, 64)
-				if err == nil {
-					totalEquityPerCoin = equity
-				}
-				break
-			}
-		}
-
-		// ignorar moedas com balance inferior a 10 USD
-		if (totalEquityPerCoin < 10) {
+	// Iterar moedas da carteira (não só símbolos com posição).
+	// Sem posição aberta = 100% exposto (exposto = equity da moeda).
+	for _, coinBalance := range lastWallet.Coin {
+		coin := coinBalance.Coin
+		totalEquityPerCoin, err := strconv.ParseFloat(coinBalance.UsdValue, 64)
+		if err != nil || totalEquityPerCoin < 10 {
 			continue
+		}
+
+		var symbolPositions []*PositionData
+		var symbols []string
+		for symbol, list := range positionsBySymbol {
+			if symbolToCoin(symbol) != coin {
+				continue
+			}
+			symbolPositions = append(symbolPositions, list...)
+			symbols = append(symbols, symbol)
+		}
+		displaySymbol := coin + "USD"
+		if len(symbols) == 1 {
+			displaySymbol = symbols[0]
+		} else if len(symbols) > 1 {
+			displaySymbol = strings.Join(symbols, "/")
 		}
 
 		totalValidPositions++
 
-		// Calcular valores da posição
 		longPosUSD, protecaoPosUSD, expostoPosUSD := calculatePositionValuesByMode(symbolPositions, totalEquityPerCoin, oneWayMode)
 		totalProtecaoUSD += protecaoPosUSD
 		totalLongUSD += longPosUSD
@@ -2121,21 +2117,18 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 			totalLongIsolated += longIsolated
 		}
 
-		// Calcular % protegida para esta posição
 		var percentProtegidaPos float64 = 0.0
 		if protecaoPosUSD > 0 && totalEquityPerCoin > 0 {
 			percentProtegidaPos = (protecaoPosUSD / totalEquityPerCoin) * 100
 		}
 
-		// Calcular % longada para esta posição
 		var percentLongadaPos float64 = 0.0
 		if longPosUSD > 0 && totalEquityPerCoin > 0 {
 			percentLongadaPos = (longPosUSD / totalEquityPerCoin) * 100
 		}
 
-		// Criar mensagem da moeda (para usar no else se necessário)
 		var coinMsgParts []string
-		coinMsgParts = append(coinMsgParts, fmt.Sprintf("📌 %s (%s):", coin, symbol))
+		coinMsgParts = append(coinMsgParts, fmt.Sprintf("📌 %s (%s):", coin, displaySymbol))
 		coinMsgParts = append(coinMsgParts, fmt.Sprintf("  💰 Total: $%s USD", formatPriceCoin(totalEquityPerCoin)))
 		if useMarginFmt {
 			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  🛡️ Protegido: %s", formatMarginUSD(protCross, protIsolated)))
@@ -2171,6 +2164,11 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 
 	for _, coinMsg := range coinMessages {
 		messageParts = append(messageParts, coinMsg)
+	}
+
+	// Sem moeda processada (ex.: só totalEquity): 100% exposto = carteira inteira.
+	if totalValidPositions == 0 && totalEquity > 0 {
+		totalExposicaoUSD = totalEquity
 	}
 
 	// retornar o resumo geral da carteira apenas se tiver mais de uma posição válida ou nenhuma posição válida
