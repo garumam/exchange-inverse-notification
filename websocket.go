@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1589,20 +1590,48 @@ func (wsm *WebSocketManager) handlePositionMessage(wsConn *WebSocketConnection, 
 			continue
 		}
 
+		size, parseErr := strconv.ParseFloat(posData.Size, 64)
+		if parseErr != nil {
+			size = 0
+		}
+		size = math.Abs(size)
+		posData.Size = strconv.FormatFloat(size, 'f', -1, 64)
+
 		// Persistir última mensagem de position no banco (logo após validar)
 		messageType := "position"
+		hasMarginMode := false
 		if !oneWayMode && (posData.Side == "Buy" || posData.Side == "Sell") {
 			messageType = "position" + posData.Side
 			switch posData.MarginMode {
 			case "cross":
 				messageType += "Cross"
+				hasMarginMode = true
 			case "isolated":
 				messageType += "Isolated"
+				hasMarginMode = true
 			}
 		}
+
+		// Posição fechada: remove snapshot em vez de gravar size=0
+		if size <= 0 {
+			if err := wsm.db.DeleteLastMessageSnapshot(wsConn.AccountID, messageType, posData.Symbol); err != nil && logger != nil {
+				logger.Log("Erro ao remover snapshot de position fechada: %v", err)
+			}
+			continue
+		}
+
 		if jsonData, err := json.Marshal(posData); err == nil {
 			if err := wsm.db.SaveLastMessageSnapshot(wsConn.AccountID, messageType, posData.Symbol, string(jsonData)); err != nil && logger != nil {
 				logger.Log("Erro ao salvar snapshot de position no banco: %v", err)
+			}
+		}
+
+		// OKX tipado (cross/isolated): remove só o legado sem margem do mesmo side+símbolo.
+		// Cross e Isolated convivem; Bybit (sem MarginMode) não entra aqui.
+		if hasMarginMode && (posData.Side == "Buy" || posData.Side == "Sell") {
+			legacyType := "position" + posData.Side
+			if err := wsm.db.DeleteLastMessageSnapshot(wsConn.AccountID, legacyType, posData.Symbol); err != nil && logger != nil {
+				logger.Log("Erro ao remover snapshot legado %s: %v", legacyType, err)
 			}
 		}
 	}
@@ -1758,11 +1787,51 @@ func (wsm *WebSocketManager) getPositionSnapshotTypes(accountID int64) []string 
 }
 
 func buildPositionsBySymbol(positionRows []PositionSnapshotRow) map[string][]*PositionData {
-	positions := make(map[string][]*PositionData)
+	raw := make(map[string][]*PositionData)
 	for _, row := range positionRows {
 		var pos PositionData
-		if err := json.Unmarshal([]byte(row.Message), &pos); err == nil {
-			positions[row.Symbol] = append(positions[row.Symbol], &pos)
+		if err := json.Unmarshal([]byte(row.Message), &pos); err != nil {
+			continue
+		}
+		size, err := strconv.ParseFloat(pos.Size, 64)
+		if err != nil {
+			size = 0
+		}
+		size = math.Abs(size)
+		if size <= 0 {
+			continue
+		}
+		pos.Size = strconv.FormatFloat(size, 'f', -1, 64)
+		symbol := row.Symbol
+		if symbol == "" {
+			symbol = pos.Symbol
+		}
+		raw[symbol] = append(raw[symbol], &pos)
+	}
+
+	// Se o símbolo já tem snapshot tipado (cross/isolated), ignora legado sem MarginMode.
+	// Bybit (só Buy/Sell sem margem) mantém todas as posições.
+	positions := make(map[string][]*PositionData, len(raw))
+	for symbol, list := range raw {
+		hasMargin := false
+		for _, p := range list {
+			if p.MarginMode == "cross" || p.MarginMode == "isolated" {
+				hasMargin = true
+				break
+			}
+		}
+		if !hasMargin {
+			positions[symbol] = list
+			continue
+		}
+		filtered := make([]*PositionData, 0, len(list))
+		for _, p := range list {
+			if p.MarginMode == "cross" || p.MarginMode == "isolated" {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) > 0 {
+			positions[symbol] = filtered
 		}
 	}
 	return positions
@@ -1907,6 +1976,35 @@ func commonMarginMode(orders []OrderData) string {
 }
 
 func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *WebSocketConnection) {
+	wsm.processWalletNotificationSince(accountID, wsConn, time.Now().Add(-17*time.Minute))
+}
+
+// ResendWalletNotification reenvia a notificação de carteira usando os snapshots atuais do banco.
+// Exige conta monitorada (conexão ativa) para reutilizar webhook/config da conexão.
+func (wsm *WebSocketManager) ResendWalletNotification(accountID int64) error {
+	wsm.mu.RLock()
+	conn, exists := wsm.connections[accountID]
+	running := exists && conn != nil && conn.Running
+	wsm.mu.RUnlock()
+	if !running {
+		return fmt.Errorf("conta não está sendo monitorada")
+	}
+
+	// Lookback amplo: usa o último snapshot de wallet disponível, não só os 17 minutos.
+	sinceWallet := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	walletRows, err := wsm.db.GetWalletSnapshotsUpdatedSince(accountID, sinceWallet)
+	if err != nil {
+		return fmt.Errorf("erro ao buscar snapshots de wallet: %w", err)
+	}
+	if len(walletRows) == 0 {
+		return fmt.Errorf("nenhum snapshot de wallet encontrado no banco")
+	}
+
+	wsm.processWalletNotificationSince(accountID, conn, sinceWallet)
+	return nil
+}
+
+func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsConn *WebSocketConnection, sinceWallet time.Time) {
 	// Capturar panics
 	defer func() {
 		if r := recover(); r != nil {
@@ -1937,8 +2035,6 @@ func (wsm *WebSocketManager) processWalletNotification(accountID int64, wsConn *
 
 	wsConn = activeConn
 
-	// Buscar wallets atualizadas nos últimos 17 minutos no banco
-	sinceWallet := time.Now().Add(-17 * time.Minute)
 	walletRows, err := wsm.db.GetWalletSnapshotsUpdatedSince(accountID, sinceWallet)
 	if err != nil || len(walletRows) == 0 {
 		return

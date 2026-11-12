@@ -53,6 +53,9 @@ func NewDatabase() (*Database, error) {
 	if err := database.initSchema(); err != nil {
 		return nil, err
 	}
+	if err := database.CleanupStalePositionSnapshots(); err != nil {
+		return nil, fmt.Errorf("cleanup stale position snapshots: %w", err)
+	}
 
 	return database, nil
 }
@@ -318,6 +321,56 @@ func (d *Database) DeleteLastMessageSnapshot(accountID int64, messageType, symbo
 		accountID, messageType, symbol,
 	)
 	return err
+}
+
+// CleanupStalePositionSnapshots remove snapshots de position inválidos:
+// - size <= 0
+// - legado positionBuy/positionSell somente quando já existe irmão Cross/Isolated
+//   no mesmo (account_id, symbol). Contas Bybit puras (só Buy/Sell) não são tocadas.
+func (d *Database) CleanupStalePositionSnapshots() error {
+	if _, err := d.db.Exec(`
+		DELETE FROM last_message_snapshots
+		WHERE message_type LIKE 'position%'
+		  AND CAST(json_extract(message, '$.size') AS REAL) <= 0
+	`); err != nil {
+		return fmt.Errorf("delete zero-size position snapshots: %w", err)
+	}
+
+	if _, err := d.db.Exec(`
+		DELETE FROM last_message_snapshots
+		WHERE rowid IN (
+			SELECT legacy.rowid
+			FROM last_message_snapshots AS legacy
+			WHERE legacy.message_type = 'positionBuy'
+			  AND EXISTS (
+				SELECT 1 FROM last_message_snapshots AS typed
+				WHERE typed.account_id = legacy.account_id
+				  AND typed.symbol = legacy.symbol
+				  AND typed.message_type IN ('positionBuyCross', 'positionBuyIsolated')
+			  )
+		)
+	`); err != nil {
+		return fmt.Errorf("delete legacy positionBuy when typed exists: %w", err)
+	}
+
+	if _, err := d.db.Exec(`
+		DELETE FROM last_message_snapshots
+		WHERE rowid IN (
+			SELECT legacy.rowid
+			FROM last_message_snapshots AS legacy
+			WHERE legacy.message_type = 'positionSell'
+			  AND EXISTS (
+				SELECT 1 FROM last_message_snapshots AS typed
+				WHERE typed.account_id = legacy.account_id
+				  AND typed.symbol = legacy.symbol
+				  AND typed.message_type IN ('positionSellCross', 'positionSellIsolated')
+			  )
+		)
+	`); err != nil {
+		return fmt.Errorf("delete legacy positionSell when typed exists: %w", err)
+	}
+
+	return nil
 }
 
 func validateHTTPSendQueueURL(sendType, url string) error {

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const projectVersion = "v0.0.9"
+const projectVersion = "v0.0.10"
 
 func main() {
 	db, err := NewDatabase()
@@ -61,6 +61,8 @@ func main() {
 		case "10":
 			handleManageHTTPSendQueue(db, scanner)
 		case "11":
+			handleResendWalletNotification(wsManager, scanner)
+		case "12":
 			fmt.Println("Saindo...")
 			return
 		default:
@@ -110,7 +112,8 @@ func showMenu(wsManager *WebSocketManager) {
 	fmt.Println("8. Visualizar logs")
 	fmt.Println("9. Gerenciar snapshots do banco")
 	fmt.Println("10. Gerenciar fila de envios")
-	fmt.Println("11. Desligar")
+	fmt.Println("11. Reenviar notificação de carteira")
+	fmt.Println("12. Desligar")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("ℹ️  Se a janela for fechada, o monitoramento será pausado")
 	fmt.Println("   automaticamente.")
@@ -1223,6 +1226,78 @@ func viewLogTail(accountID int64, accountName string, scanner *bufio.Scanner) {
 			fmt.Println(line)
 		}
 	}
+}
+
+func handleResendWalletNotification(wsManager *WebSocketManager, scanner *bufio.Scanner) {
+	clearScreen()
+	accounts, err := wsManager.accountManager.ListAccounts()
+	if err != nil {
+		fmt.Printf("Erro ao listar contas: %v\n", err)
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+		return
+	}
+	if len(accounts) == 0 {
+		fmt.Println("=== Reenviar Notificação de Carteira ===")
+		fmt.Println("\nNenhuma conta cadastrada.")
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+		return
+	}
+
+	fmt.Println("=== Reenviar Notificação de Carteira ===")
+	fmt.Println("\nUsa os snapshots atuais do banco (wallet + positions).")
+	fmt.Println("A conta precisa estar sendo monitorada.\n")
+	fmt.Println("=== Contas ===")
+	for i, acc := range accounts {
+		status := "parado"
+		if wsManager.IsConnectionActive(acc.ID) {
+			status = "monitorando"
+		}
+		platformLabel := acc.Platform
+		if platformLabel == "" {
+			platformLabel = "bybit"
+		}
+		fmt.Printf("%d. %s (ID: %d, %s) [%s]\n", i+1, acc.Name, acc.ID, platformLabel, status)
+	}
+	fmt.Println("0. Voltar ao menu principal")
+
+	fmt.Print("\nDigite o número da conta (ou 0 para voltar): ")
+	scanner.Scan()
+	var index int
+	if _, err := fmt.Sscanf(strings.TrimSpace(scanner.Text()), "%d", &index); err != nil {
+		fmt.Println("Número inválido!")
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+		return
+	}
+	if index == 0 {
+		return
+	}
+	if index < 1 || index > len(accounts) {
+		fmt.Println("Número inválido!")
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+		return
+	}
+
+	account := accounts[index-1]
+	fmt.Printf("\nReenviar notificação de carteira da conta '%s'? (s/n): ", account.Name)
+	scanner.Scan()
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
+		fmt.Println("Operação cancelada.")
+		fmt.Println("\nPressione Enter para voltar ao menu principal...")
+		scanner.Scan()
+		return
+	}
+
+	if err := wsManager.ResendWalletNotification(account.ID); err != nil {
+		fmt.Printf("Erro ao reenviar: %v\n", err)
+	} else {
+		fmt.Println("Notificação de carteira reenviada com sucesso!")
+	}
+	fmt.Println("\nPressione Enter para voltar ao menu principal...")
+	scanner.Scan()
 }
 
 func handleManageSnapshots(manager *AccountManager, db *Database, scanner *bufio.Scanner) {
