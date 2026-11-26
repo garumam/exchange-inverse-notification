@@ -1985,13 +1985,13 @@ func formatMarginPct(crossUSD, isolatedUSD, equity float64) string {
 	return strings.Join(parts, " e ")
 }
 
-// calcPercentExposicaoTotal: (exposto + long - short) / total * 100.
-// exposto já deve estar zerado se era negativo.
-func calcPercentExposicaoTotal(expostoUSD, longUSD, shortUSD, totalEquity float64) float64 {
+// calcPercentExposicaoTotal: (exposto + long) / total * 100.
+// exposto já deve estar zerado se era negativo; o short já entra no cálculo do exposto.
+func calcPercentExposicaoTotal(expostoUSD, longUSD, totalEquity float64) float64 {
 	if totalEquity <= 0 {
 		return 0
 	}
-	return ((expostoUSD + longUSD - shortUSD) / totalEquity) * 100
+	return ((expostoUSD + longUSD) / totalEquity) * 100
 }
 
 // formatExposicaoTotalPct formata o % de exposição líquida; com breakdown anexa (cross)/(isolated).
@@ -2220,7 +2220,7 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 			}
 		}
 		if !oneWayMode {
-			percentExposicaoPos := calcPercentExposicaoTotal(expostoPosUSD, longPosUSD, protecaoPosUSD, totalEquityPerCoin)
+			percentExposicaoPos := calcPercentExposicaoTotal(expostoPosUSD, longPosUSD, totalEquityPerCoin)
 			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  ⚠️ %% Exposição total: %s",
 				formatExposicaoTotalPct(percentExposicaoPos, useMarginFmt, protCross+longCross, protIsolated+longIsolated)))
 		}
@@ -2280,7 +2280,7 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 			}
 		}
 		if !oneWayMode {
-			percentExposicaoGeral := calcPercentExposicaoTotal(totalExposicaoUSD, totalLongUSD, totalProtecaoUSD, totalEquity)
+			percentExposicaoGeral := calcPercentExposicaoTotal(totalExposicaoUSD, totalLongUSD, totalEquity)
 			messageParts = append(messageParts, fmt.Sprintf("  ⚠️ %% Exposição total: %s",
 				formatExposicaoTotalPct(percentExposicaoGeral, anyMarginBreakdown, totalProtCross+totalLongCross, totalProtIsolated+totalLongIsolated)))
 		}
