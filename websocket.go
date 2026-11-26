@@ -770,9 +770,28 @@ func (wsm *WebSocketManager) handleOrderMessage(wsConn *WebSocketConnection, ord
 	}
 }
 
+// hedgeIntentSuffix retorna o aviso de intenção da ordem/stop em modo hedge.
+// Em one-way retorna vazio.
+func hedgeIntentSuffix(side string, reduceOnly, oneWayMode bool) string {
+	if oneWayMode {
+		return ""
+	}
+	switch {
+	case side == "Buy" && !reduceOnly:
+		return " (aumentar LONG)"
+	case side == "Buy" && reduceOnly:
+		return " (reduzir SHORT)"
+	case side == "Sell" && !reduceOnly:
+		return " (aumentar SHORT)"
+	case side == "Sell" && reduceOnly:
+		return " (reduzir LONG)"
+	}
+	return ""
+}
+
 // formatOrderGroupMessage formata uma mensagem para um grupo de ordens (uma ou várias). Usado por processDelayBuffer.
 // wallet: última wallet da conta (pode ser nil); se tiver Coin da moeda da ordem, inclui % em relação ao UsdValue da Coin.
-func formatOrderGroupMessage(wallet *WalletData, groupOrders []OrderData) string {
+func formatOrderGroupMessage(wallet *WalletData, groupOrders []OrderData, oneWayMode bool) string {
 	if len(groupOrders) == 0 {
 		return ""
 	}
@@ -781,6 +800,7 @@ func formatOrderGroupMessage(wallet *WalletData, groupOrders []OrderData) string
 	if firstOrder.ReduceOnly {
 		reducePrefix = "Reduce "
 	}
+	intentSuffix := hedgeIntentSuffix(firstOrder.Side, firstOrder.ReduceOnly, oneWayMode)
 	var minPrice, maxPrice float64
 	var totalQty float64
 	var coinQty float64 // para preço médio ponderado: soma(preço * qty)
@@ -820,22 +840,22 @@ func formatOrderGroupMessage(wallet *WalletData, groupOrders []OrderData) string
 		orderIcon = "🔴"
 	}
 	if len(groupOrders) == 1 {
-		return fmt.Sprintf("%s Nova ordem aberta - %s %s%s %s @ %s (Qty: %s USD)%s%s",
-			orderIcon, firstOrder.Symbol, reducePrefix, firstOrder.Side, firstOrder.OrderType, displayPrice, formatPriceCoin(totalQty), pctSuffix, marginModeSuffix(firstOrder.MarginMode))
+		return fmt.Sprintf("%s Nova ordem aberta - %s %s%s %s @ %s (Qty: %s USD)%s%s%s",
+			orderIcon, firstOrder.Symbol, reducePrefix, firstOrder.Side, firstOrder.OrderType, displayPrice, formatPriceCoin(totalQty), pctSuffix, marginModeSuffix(firstOrder.MarginMode), intentSuffix)
 	}
 	modeSuffix := marginModeSuffix(commonMarginMode(groupOrders))
 	if minPrice == maxPrice {
-		return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s @ %s (Qty Total: %s USD)%s%s",
-			orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol, displayPrice, formatPriceCoin(totalQty), pctSuffix, modeSuffix)
+		return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s @ %s (Qty Total: %s USD)%s%s%s",
+			orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol, displayPrice, formatPriceCoin(totalQty), pctSuffix, modeSuffix, intentSuffix)
 	}
 
-	return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s\n   Range: %s até %s (Preço médio: %s)\n   Qty Total: %s USD%s%s",
+	return fmt.Sprintf("%s %d ordens %s%s %s agrupadas - %s\n   Range: %s até %s (Preço médio: %s)\n   Qty Total: %s USD%s%s%s",
 		orderIcon, len(groupOrders), reducePrefix, firstOrder.Side, firstOrder.OrderType, firstOrder.Symbol,
-		formatPriceCoin(minPrice), formatPriceCoin(maxPrice), formatPriceCoin(avgPrice), formatPriceCoin(totalQty), pctSuffix, modeSuffix)
+		formatPriceCoin(minPrice), formatPriceCoin(maxPrice), formatPriceCoin(avgPrice), formatPriceCoin(totalQty), pctSuffix, modeSuffix, intentSuffix)
 }
 
 // formatOrderMovedMessage formata mensagem de ordem movida (preço alterado). Usado por processDelayBuffer.
-func formatOrderMovedMessage(order OrderData, oldPrice, newPrice float64, wallet *WalletData) string {
+func formatOrderMovedMessage(order OrderData, oldPrice, newPrice float64, wallet *WalletData, oneWayMode bool) string {
 	reducePrefix := ""
 	if order.ReduceOnly {
 		reducePrefix = "Reduce "
@@ -848,12 +868,13 @@ func formatOrderMovedMessage(order OrderData, oldPrice, newPrice float64, wallet
 	}
 	qty, _ := strconv.ParseFloat(order.Qty, 64)
 	pctSuffix := orderPctOfWallet(wallet, order.Symbol, qty)
-	return fmt.Sprintf("📝 %s Ordem movida - %s %s%s %s%s\n   Preço: %s → %s (Qty: %s USD)%s",
-		orderIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), formatPriceCoin(qty), pctSuffix)
+	intentSuffix := hedgeIntentSuffix(order.Side, order.ReduceOnly, oneWayMode)
+	return fmt.Sprintf("📝 %s Ordem movida - %s %s%s %s%s\n   Preço: %s → %s (Qty: %s USD)%s%s",
+		orderIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), formatPriceCoin(qty), pctSuffix, intentSuffix)
 }
 
 // formatCancelMessage formata mensagem de cancelamentos agrupados.
-func formatCancelMessage(orders []OrderData) string {
+func formatCancelMessage(orders []OrderData, oneWayMode bool) string {
 	if len(orders) == 0 {
 		return ""
 	}
@@ -864,14 +885,15 @@ func formatCancelMessage(orders []OrderData) string {
 			reducePrefix = "Reduce "
 		}
 		displayPrice := getDisplayPrice(order)
-		parts = append(parts, fmt.Sprintf("  • %s %s%s %s @ %s%s",
-			order.Symbol, reducePrefix, order.Side, order.OrderType, displayPrice, marginModeSuffix(order.MarginMode)))
+		intentSuffix := hedgeIntentSuffix(order.Side, order.ReduceOnly, oneWayMode)
+		parts = append(parts, fmt.Sprintf("  • %s %s%s %s @ %s%s%s",
+			order.Symbol, reducePrefix, order.Side, order.OrderType, displayPrice, marginModeSuffix(order.MarginMode), intentSuffix))
 	}
 	return strings.Join(parts, "\n")
 }
 
 // formatStopOrderMessage formata mensagem de stop Untriggered.
-func formatStopOrderMessage(order OrderData, wallet *WalletData) string {
+func formatStopOrderMessage(order OrderData, wallet *WalletData, oneWayMode bool) string {
 	reducePrefix := ""
 	if order.ReduceOnly {
 		reducePrefix = "Reduce "
@@ -901,12 +923,13 @@ func formatStopOrderMessage(order OrderData, wallet *WalletData) string {
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("%s Stop %s%s %s - %s @ %s %s%s%s%s",
-		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, pctSuffix, stopTypeSuffix, marginModeSuffix(order.MarginMode))
+	intentSuffix := hedgeIntentSuffix(order.Side, order.ReduceOnly, oneWayMode)
+	return fmt.Sprintf("%s Stop %s%s %s - %s @ %s %s%s%s%s%s",
+		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, pctSuffix, stopTypeSuffix, marginModeSuffix(order.MarginMode), intentSuffix)
 }
 
 // formatStopMovedMessage formata mensagem de stop movido (trigger price alterado). Usado por processDelayBuffer.
-func formatStopMovedMessage(order OrderData, oldPrice, newPrice float64, wallet *WalletData) string {
+func formatStopMovedMessage(order OrderData, oldPrice, newPrice float64, wallet *WalletData, oneWayMode bool) string {
 	reducePrefix := ""
 	if order.ReduceOnly {
 		reducePrefix = "Reduce "
@@ -925,12 +948,13 @@ func formatStopMovedMessage(order OrderData, oldPrice, newPrice float64, wallet 
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("📝 %s Stop movido - %s %s%s %s%s%s\n   Preço: %s → %s %s%s",
-		stopIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, stopTypeSuffix, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), mensagemQty, pctSuffix)
+	intentSuffix := hedgeIntentSuffix(order.Side, order.ReduceOnly, oneWayMode)
+	return fmt.Sprintf("📝 %s Stop movido - %s %s%s %s%s%s\n   Preço: %s → %s %s%s%s",
+		stopIcon, order.Symbol, reducePrefix, order.Side, order.OrderType, stopTypeSuffix, marginModeSuffix(order.MarginMode), formatPriceCoin(oldPrice), formatPriceCoin(newPrice), mensagemQty, pctSuffix, intentSuffix)
 }
 
 // formatStopCancellationMessage formata mensagem de stop cancelado (Deactivated).
-func formatStopCancellationMessage(order OrderData) string {
+func formatStopCancellationMessage(order OrderData, oneWayMode bool) string {
 	reducePrefix := ""
 	if order.ReduceOnly {
 		reducePrefix = "Reduce "
@@ -959,8 +983,9 @@ func formatStopCancellationMessage(order OrderData) string {
 		stopIcon = "🔴"
 	}
 	stopTypeSuffix := formatStopOrderTypeSuffix(order.StopOrderType)
-	return fmt.Sprintf("❌ %s Stop %s%s %s **CANCELADO** - %s @ %s %s%s%s",
-		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, stopTypeSuffix, marginModeSuffix(order.MarginMode))
+	intentSuffix := hedgeIntentSuffix(order.Side, order.ReduceOnly, oneWayMode)
+	return fmt.Sprintf("❌ %s Stop %s%s %s **CANCELADO** - %s @ %s %s%s%s%s",
+		stopIcon, reducePrefix, order.Side, order.OrderType, order.Symbol, formatPriceCoin(triggerPrice), mensagemQty, stopTypeSuffix, marginModeSuffix(order.MarginMode), intentSuffix)
 }
 
 // formatStopOrderTypeSuffix retorna o sufixo de tipo de stop para mensagem.
@@ -1454,6 +1479,10 @@ func (wsm *WebSocketManager) processDelayBuffer(accountID int64, wsConn *WebSock
 	if walletRows, err := wsm.db.GetWalletSnapshotsUpdatedSince(accountID, sinceWallet); err == nil && len(walletRows) > 0 {
 		lastWallet = mergeWalletSnapshotRows(walletRows)
 	}
+	oneWayMode := true
+	if wsConn.Account != nil {
+		oneWayMode = wsConn.Account.OneWayMode
+	}
 	var parts []string
 	for _, item := range orderNotifications {
 		if len(item.Data) == 0 {
@@ -1461,9 +1490,9 @@ func (wsm *WebSocketManager) processDelayBuffer(accountID int64, wsConn *WebSock
 		}
 		switch item.NotificationType {
 		case "orders_group", "simple_order":
-			parts = append(parts, formatOrderGroupMessage(lastWallet, item.Data))
+			parts = append(parts, formatOrderGroupMessage(lastWallet, item.Data, oneWayMode))
 		case "order_moved":
-			parts = append(parts, formatOrderMovedMessage(item.Data[0], item.OldPrice, item.NewPrice, lastWallet))
+			parts = append(parts, formatOrderMovedMessage(item.Data[0], item.OldPrice, item.NewPrice, lastWallet, oneWayMode))
 		case "cancelled_order":
 			var toNotify []OrderData
 			for _, o := range item.Data {
@@ -1472,14 +1501,14 @@ func (wsm *WebSocketManager) processDelayBuffer(accountID int64, wsConn *WebSock
 				}
 			}
 			if len(toNotify) > 0 {
-				parts = append(parts, formatCancelMessage(toNotify))
+				parts = append(parts, formatCancelMessage(toNotify, oneWayMode))
 			}
 		case "untriggered_stop":
-			parts = append(parts, formatStopOrderMessage(item.Data[0], lastWallet))
+			parts = append(parts, formatStopOrderMessage(item.Data[0], lastWallet, oneWayMode))
 		case "stop_moved":
-			parts = append(parts, formatStopMovedMessage(item.Data[0], item.OldPrice, item.NewPrice, lastWallet))
+			parts = append(parts, formatStopMovedMessage(item.Data[0], item.OldPrice, item.NewPrice, lastWallet, oneWayMode))
 		case "deactivated_stop":
-			parts = append(parts, formatStopCancellationMessage(item.Data[0]))
+			parts = append(parts, formatStopCancellationMessage(item.Data[0], oneWayMode))
 		}
 	}
 	if len(parts) > 0 {
@@ -1855,6 +1884,9 @@ func calculatePositionValuesByMode(positions []*PositionData, totalEquityCoin fl
 			longUSD = size
 		}
 		expostoUSD = totalEquityCoin - size
+		if expostoUSD < 0 {
+			expostoUSD = 0
+		}
 		return
 	}
 
@@ -1870,6 +1902,9 @@ func calculatePositionValuesByMode(positions []*PositionData, totalEquityCoin fl
 		}
 	}
 	expostoUSD = totalEquityCoin - protecaoUSD - longUSD
+	if expostoUSD < 0 {
+		expostoUSD = 0
+	}
 	return
 }
 
@@ -1948,6 +1983,35 @@ func formatMarginPct(crossUSD, isolatedUSD, equity float64) string {
 		parts = append(parts, fmt.Sprintf("%s%% (isolated)", formatPriceCoin(pct)))
 	}
 	return strings.Join(parts, " e ")
+}
+
+// calcPercentExposicaoTotal: (exposto + long - short) / total * 100.
+// exposto já deve estar zerado se era negativo.
+func calcPercentExposicaoTotal(expostoUSD, longUSD, shortUSD, totalEquity float64) float64 {
+	if totalEquity <= 0 {
+		return 0
+	}
+	return ((expostoUSD + longUSD - shortUSD) / totalEquity) * 100
+}
+
+// formatExposicaoTotalPct formata o % de exposição líquida; com breakdown anexa (cross)/(isolated).
+func formatExposicaoTotalPct(pct float64, useMarginFmt bool, crossUSD, isolatedUSD float64) string {
+	pctStr := formatPriceCoin(pct) + "%"
+	if !useMarginFmt {
+		return pctStr
+	}
+	hasCross := crossUSD > 0
+	hasIsolated := isolatedUSD > 0
+	if hasCross && !hasIsolated {
+		return pctStr + " (cross)"
+	}
+	if hasIsolated && !hasCross {
+		return pctStr + " (isolated)"
+	}
+	if hasCross && hasIsolated {
+		return pctStr + " (cross e isolated)"
+	}
+	return pctStr
 }
 
 // marginModeSuffix retorna " (cross)" / " (isolated)" ou "" se vazio.
@@ -2155,6 +2219,11 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 				coinMsgParts = append(coinMsgParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaPos)))
 			}
 		}
+		if !oneWayMode {
+			percentExposicaoPos := calcPercentExposicaoTotal(expostoPosUSD, longPosUSD, protecaoPosUSD, totalEquityPerCoin)
+			coinMsgParts = append(coinMsgParts, fmt.Sprintf("  ⚠️ %% Exposição total: %s",
+				formatExposicaoTotalPct(percentExposicaoPos, useMarginFmt, protCross+longCross, protIsolated+longIsolated)))
+		}
 		coinMsgParts = append(coinMsgParts, "")
 		coinMessages = append(coinMessages, strings.Join(coinMsgParts, "\n"))
 	}
@@ -2209,6 +2278,11 @@ func (wsm *WebSocketManager) processWalletNotificationSince(accountID int64, wsC
 				}
 				messageParts = append(messageParts, fmt.Sprintf("  📊 %% Longada: %s%%", formatPriceCoin(percentLongadaGeral)))
 			}
+		}
+		if !oneWayMode {
+			percentExposicaoGeral := calcPercentExposicaoTotal(totalExposicaoUSD, totalLongUSD, totalProtecaoUSD, totalEquity)
+			messageParts = append(messageParts, fmt.Sprintf("  ⚠️ %% Exposição total: %s",
+				formatExposicaoTotalPct(percentExposicaoGeral, anyMarginBreakdown, totalProtCross+totalLongCross, totalProtIsolated+totalLongIsolated)))
 		}
 	}
 
