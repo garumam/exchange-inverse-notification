@@ -1985,13 +1985,13 @@ func formatMarginPct(crossUSD, isolatedUSD, equity float64) string {
 	return strings.Join(parts, " e ")
 }
 
-// calcPercentExposicaoTotal: (exposto + long) / total * 100.
+// calcPercentExposicaoTotal: (exposto + long*2) / total * 100.
 // exposto já deve estar zerado se era negativo; o short já entra no cálculo do exposto.
 func calcPercentExposicaoTotal(expostoUSD, longUSD, totalEquity float64) float64 {
 	if totalEquity <= 0 {
 		return 0
 	}
-	return ((expostoUSD + longUSD) / totalEquity) * 100
+	return ((expostoUSD + longUSD*2) / totalEquity) * 100
 }
 
 // formatExposicaoTotalPct formata o % de exposição líquida; com breakdown anexa (cross)/(isolated).
